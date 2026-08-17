@@ -1,7 +1,7 @@
 #pragma once
 
-#include <opencv2/opencv.hpp>
 #include <vector>
+#include <cstdint>
 
 #include "Config.h"
 #include "Event.h"
@@ -29,24 +29,26 @@ public:
 
     /**
      * Generate events for one frame.
+     *
+     * image        pointer to width*height pixel values, row-major
+     * stridePixels row stride in PIXELS (not bytes) - pass width if the
+     *              buffer is tightly packed (no row padding)
      */
     EventPacket generate(
-        const cv::Mat& gray,
+        const uint16_t *image,
+        int width,
+        int height,
+        int stridePixels,
         double timestamp);
-        
-    EventPacket generate(
-    const uint16_t *image,
-    int width,
-    int height,
-    int stridePixels,
-    double timestamp);
 
 private:
 
-    inline float intensity(uint8_t value) const;
+    inline float intensity(uint16_t value) const;
 
+    // Matches generate()'s pointer+stride contract - no data copy.
     void initializeFirstFrame(
-        const cv::Mat& gray,
+        const uint16_t *image,
+        int stridePixels,
         double timestamp);
 
 private:

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <iostream>
 #include <cmath>
+#include <vector>
 
 #include "NvSIPLClient.hpp"
 #include "CProfiler.hpp"
@@ -23,6 +24,7 @@
 #include "EventGenerator.h"
 #include "EventPacket.h"
 #include "CEventFileWriter.hpp"
+#include "CRawCaptureWriter.hpp"
 
 #if !NV_IS_SAFETY
 #include "CComposite.hpp"
@@ -92,18 +94,36 @@ class CNvSIPLConsumer
         }
 
         // --- Event generation cleanup (step 1-4) ---
+        // (capture buffers are std::vector members - no manual free needed)
         if (m_pEventFileWriter != nullptr) {
             m_pEventFileWriter->Deinit();
             m_pEventFileWriter = nullptr;
         }
-        delete[] m_pGrayExtractBuff;
-        m_pGrayExtractBuff = nullptr;
+
+        // --- Raw capture cleanup ---
+        if (m_pRawCaptureWriter != nullptr) {
+            m_pRawCaptureWriter->Deinit();
+            m_pRawCaptureWriter = nullptr;
+        }
 
         return;
     }
 
     void EnableMetadataLogging(void) {
         m_bShowMetadata = true;
+    }
+
+    // --- Raw Bayer capture-for-analysis (standalone, independent of
+    // event generation) ---
+    // Dumps the first `numFrames` raw16 Bayer frames to sFilename, then
+    // stops automatically. Use this FIRST, in isolation, to verify the
+    // raw capture is correct via visualize_raw_bayer.py before wiring
+    // raw data into EventGenerator.
+    void EnableRawCapture(const string &sFilename, uint32_t numFrames = 10)
+    {
+        m_sRawCaptureFilename = sFilename;
+        m_uRawCaptureNumFrames = numFrames;
+        m_bRawCaptureEnabled = true;
     }
 
     // --- Event generation setup (step 1 & 4) ---
@@ -176,24 +196,65 @@ class CNvSIPLConsumer
             }
         }
 
+        // --- Raw Bayer capture-for-analysis (standalone, run this FIRST) ---
+        if (m_bRawCaptureEnabled && !m_bRawCaptureDone) {
+            std::vector<uint16_t> raw16;
+            int rawWidth = 0, rawHeight = 0, rawStride = 0;
+            auto rawStatus = CaptureRawBayerBuffer(pNvMBuffer, cpuWaitContext,
+                                                    raw16, rawWidth, rawHeight, rawStride);
+            if (rawStatus != NVSIPL_STATUS_OK) {
+                LOG_ERR("RawCapture: CaptureRawBayerBuffer failed - disabling raw capture\n");
+                m_bRawCaptureDone = true; // stop retrying every frame on a hard failure
+            } else {
+                // --- DEBUG: raw pixel-range sanity check ---
+                uint16_t minVal, maxVal;
+                MinMaxU16(raw16, minVal, maxVal);
+                LOG_INFO("RawCapture: raw16 %dx%d, pixel range [%u, %u]\n",
+                          rawWidth, rawHeight, (unsigned)minVal, (unsigned)maxVal);
+
+                if (m_pRawCaptureWriter == nullptr) {
+                    m_pRawCaptureWriter.reset(new CRawCaptureWriter);
+                    if (!m_pRawCaptureWriter->Init(m_sRawCaptureFilename,
+                                                    rawWidth, rawHeight,
+                                                    m_uRawCaptureNumFrames)) {
+                        LOG_ERR("RawCapture: failed to init raw capture writer\n");
+                        m_pRawCaptureWriter = nullptr;
+                        m_bRawCaptureDone = true;
+                    }
+                }
+
+                if (m_pRawCaptureWriter != nullptr) {
+                    m_pRawCaptureWriter->WriteFrame(raw16, rawWidth, rawHeight);
+                    if (m_pRawCaptureWriter->IsDone()) {
+                        LOG_INFO("RawCapture: reached target frame count, closing capture file\n");
+                        m_pRawCaptureWriter->Deinit();
+                        m_pRawCaptureWriter = nullptr;
+                        m_bRawCaptureDone = true;
+                    }
+                }
+            }
+        }
+
         // --- Event generation (steps 1-4) ---
         if (m_bEventGenEnabled && m_pEventGenerator != nullptr) {
 
-            cv::Mat grayFrame;
-            auto evStatus = ExtractGrayFrame(pNvMBuffer, cpuWaitContext, grayFrame);
+            std::vector<uint16_t> grayFrame;
+            int grayWidth = 0, grayHeight = 0, grayStride = 0;
+            auto evStatus = ExtractGrayBuffer(pNvMBuffer, cpuWaitContext,
+                                               grayFrame, grayWidth, grayHeight, grayStride);
             if (evStatus != NVSIPL_STATUS_OK) {
-                LOG_ERR("EventGenerator: ExtractGrayFrame failed, skipping frame\n");
+                LOG_ERR("EventGenerator: ExtractGrayBuffer failed, skipping frame\n");
             } else {
                 if (!m_bEventGenInitialized) {
                     LOG_INFO("EventGenerator: initializing with %d x %d\n",
-                              grayFrame.cols, grayFrame.rows);
-                    m_pEventGenerator->initialize(grayFrame.cols, grayFrame.rows);
+                              grayWidth, grayHeight);
+                    m_pEventGenerator->initialize(grayWidth, grayHeight);
                     m_bEventGenInitialized = true;
 
                     if (!m_sEventFilename.empty()) {
                         m_pEventFileWriter.reset(new CEventFileWriter);
                         if (!m_pEventFileWriter->Init(m_sEventFilename,
-                                                       grayFrame.cols, grayFrame.rows)) {
+                                                       grayWidth, grayHeight)) {
                             LOG_ERR("EventGenerator: failed to init event file writer\n");
                             m_pEventFileWriter = nullptr;
                         }
@@ -202,10 +263,10 @@ class CNvSIPLConsumer
 
                 // --- DEBUG: pixel-range sanity check (step 2) ---
                 // Remove once mapping is confirmed correct.
-                double minVal, maxVal;
-                cv::minMaxLoc(grayFrame, &minVal, &maxVal);
-                LOG_INFO("EventGenerator: grayFrame %dx%d, pixel range [%.0f, %.0f]\n",
-                          grayFrame.cols, grayFrame.rows, minVal, maxVal);
+                uint16_t minVal, maxVal;
+                MinMaxU16(grayFrame, minVal, maxVal);
+                LOG_INFO("EventGenerator: grayFrame %dx%d, pixel range [%u, %u]\n",
+                          grayWidth, grayHeight, (unsigned)minVal, (unsigned)maxVal);
 
                 double timestamp = static_cast<double>(md.frameCaptureTSC) / m_dTscFreqHz;
 
@@ -218,7 +279,12 @@ class CNvSIPLConsumer
                 }
                 s_lastTimestamp = timestamp;
 
-                evsim::EventPacket packet = m_pEventGenerator->generate(grayFrame, timestamp);
+                // Pointer-based overload - no OpenCV dependency.
+                // stridePixels = grayWidth because our capture buffers are
+                // written tightly packed (we request pitch = width*bpp from
+                // NvSciBufObjGetPixels ourselves - see ExtractGrayBuffer).
+                evsim::EventPacket packet = m_pEventGenerator->generate(
+                    grayFrame.data(), grayWidth, grayHeight, grayStride, timestamp);
 
                 LOG_INFO("EventGenerator: frame %llu produced %zu events\n",
                           (unsigned long long)packet.frameNumber, packet.events.size());
@@ -329,16 +395,287 @@ class CNvSIPLConsumer
 
 private:
 
-    // --- Event generation: buffer -> cv::Mat gray extraction (step 2) ---
-    // ASSUMPTIONS (verify against your actual pipeline/format):
-    //   - Only plane-0-is-luma formats (Y8/Y10/Y12/Y16) are handled.
-    //     RGBA and Bayer RAW output are NOT supported here yet.
-    //   - For Y10/Y12/Y16 (bpp==2), values are assumed to span the full
-    //     16-bit range when downscaled to 8-bit via convertTo(1.0/256.0).
-    //     If Y10/Y12 are left/right-justified instead, this scale is wrong.
-    SIPLStatus ExtractGrayFrame(INvSIPLClient::INvSIPLNvMBuffer *pNvMBuffer,
-                                 NvSciSyncCpuWaitContext cpuWaitContext,
-                                 cv::Mat &outGray)
+    // --- Raw Bayer capture (no demosaic) - std::vector, no OpenCV ---
+    // Use this INSTEAD of ExtractGrayBuffer when working directly with
+    // ICP (sensor) output in RAW10/12/16 Bayer format. Since each pixel
+    // INDEX always sees the same CFA (color filter array) position across
+    // every frame, per-pixel temporal delta is still valid without
+    // demosaicing.
+    //
+    // ASSUMPTIONS to verify with the Python analysis script:
+    //   - m_outputType is ICP (raw sensor output, pre-ISP) - if you're
+    //     capturing post-ISP RAW, the fence-wait logic below needs the
+    //     same EOF wait as ExtractGrayBuffer's non-ICP branch.
+    //   - bufAttrs.planeColorFormats[0] is in the Bayer RAW range
+    //     (matches CFileWriter's "RAW" branch condition).
+    //   - Container is 16-bit (bpp == 2) even if sensor bit depth is
+    //     10/12-bit - values will be left- or right-justified within the
+    //     16 bits depending on sensor/ISP config, which the Python script
+    //     checks via max-value histogram.
+    //
+    // Since NvSciBufObjGetPixels can be told to write at whatever pitch we
+    // request, we request pitch == width*2 (tightly packed) and write
+    // straight into the destination vector's own storage - no separate
+    // scratch buffer or copy needed, since the buffer is already native
+    // 16-bit (no widening from 8-bit required, unlike ExtractGrayBuffer).
+    SIPLStatus CaptureRawBayerBuffer(INvSIPLClient::INvSIPLNvMBuffer *pNvMBuffer,
+                                      NvSciSyncCpuWaitContext cpuWaitContext,
+                                      std::vector<uint16_t> &outRaw16,
+                                      int &outWidth, int &outHeight, int &outStridePixels)
+    {
+        NvSciError sciErr;
+        SIPLStatus status;
+
+        if (m_outputType != INvSIPLClient::ConsumerDesc::OutputType::ICP) {
+            NvSciSyncFence fence = NvSciSyncFenceInitializer;
+            status = pNvMBuffer->GetEOFNvSciSyncFence(&fence);
+            if (status != NVSIPL_STATUS_OK) {
+                LOG_ERR("RawCapture: GetEOFNvSciSyncFence failed\n");
+                return status;
+            }
+            sciErr = NvSciSyncFenceWait(&fence, cpuWaitContext, FENCE_FRAME_TIMEOUT_MS * 1000UL);
+            NvSciSyncFenceClear(&fence);
+            if (sciErr != NvSciError_Success) {
+                LOG_ERR("RawCapture: NvSciSyncFenceWait failed (err=%d)\n", (int)sciErr);
+                return NVSIPL_STATUS_ERROR;
+            }
+        }
+
+        NvSciBufObj bufPtr = pNvMBuffer->GetNvSciBufImage();
+        BufferAttrs bufAttrs;
+        status = PopulateBufAttr(bufPtr, bufAttrs);
+        if (status != NVSIPL_STATUS_OK) {
+            LOG_ERR("RawCapture: PopulateBufAttr failed\n");
+            return NVSIPL_STATUS_BAD_ARGUMENT;
+        }
+
+        // Bayer RAW range check - mirrors the condition CFileWriter uses
+        // to pick its "RAW" branch in GetBuffParams(). Log the actual
+        // enum value on mismatch so we can adjust this range if your
+        // pipeline reports something outside it.
+        bool isBayerRaw =
+            (1U == bufAttrs.planeCount) &&
+            ((bufAttrs.planeColorFormats[0] < NvSciColor_U8V8) ||
+             (bufAttrs.planeColorFormats[0] == NvSciColor_X4Bayer12RGGB_RJ) ||
+             ((bufAttrs.planeColorFormats[0] >= NvSciColor_X6Bayer10BGGI_RGGI) &&
+              (bufAttrs.planeColorFormats[0] <= NvSciColor_Bayer16IGGR_IGGB)));
+
+        if (!isBayerRaw) {
+            LOG_ERR("RawCapture: planeColorFormats[0]=%u is not in the expected "
+                     "Bayer RAW range - update isBayerRaw check\n",
+                     (unsigned)bufAttrs.planeColorFormats[0]);
+            return NVSIPL_STATUS_NOT_SUPPORTED;
+        }
+
+        uint32_t bpp = 0U;
+        if (!CUtils::GetBpp(bufAttrs.planeBitsPerPixels[0], &bpp)) {
+            LOG_ERR("RawCapture: GetBpp failed\n");
+            return NVSIPL_STATUS_ERROR;
+        }
+        if (bpp != 2U) {
+            LOG_ERR("RawCapture: expected 16-bit container (bpp=2), got bpp=%u\n", bpp);
+            return NVSIPL_STATUS_NOT_SUPPORTED;
+        }
+
+        uint32_t width  = bufAttrs.planeWidths[0];
+        uint32_t height = bufAttrs.planeHeights[0];
+        uint32_t pitch  = width * bpp; // tightly packed - request this exact pitch
+        uint32_t size   = pitch * height;
+
+        outRaw16.resize(static_cast<size_t>(width) * height);
+
+        if (bufAttrs.needSwCacheCoherency) {
+            sciErr = NvSciBufObjFlushCpuCacheRange(bufPtr, 0U, bufAttrs.planePitches[0] * height);
+            if (sciErr != NvSciError_Success) {
+                LOG_ERR("RawCapture: NvSciBufObjFlushCpuCacheRange failed\n");
+                return NVSIPL_STATUS_ERROR;
+            }
+        }
+
+        void     *pPixels[1] = { outRaw16.data() };
+        uint32_t  sizes[1]   = { size };
+        uint32_t  pitches[1] = { pitch };
+
+        sciErr = NvSciBufObjGetPixels(bufPtr, nullptr, pPixels, sizes, pitches);
+        if (sciErr != NvSciError_Success) {
+            LOG_ERR("RawCapture: NvSciBufObjGetPixels failed (err=%d)\n", (int)sciErr);
+            return NVSIPL_STATUS_ERROR;
+        }
+
+        outWidth  = static_cast<int>(width);
+        outHeight = static_cast<int>(height);
+        outStridePixels = static_cast<int>(width); // tightly packed, no row padding
+
+        return NVSIPL_STATUS_OK;
+    }
+
+    // --- Generalized single-plane capture: Bayer, Luma, RGBA, packed YUV ---
+    //
+    // Covers the SAME format buckets the original consumer's file-extension
+    // logic detects (.raw/.luma/.rgba/ and single-plane .yuv), but returns
+    // raw bytes + metadata instead of writing to disk - use this when you
+    // need the frame for further C++ processing (event generation, CV ops)
+    // rather than just archiving bytes (for pure archiving, CFileWriter
+    // already does this generically - see WriteBufferToFile).
+    //
+    // NOT covered yet: semi-planar YUV (2-3 planes, e.g. NV12) - that needs
+    // separate multi-plane handling (each plane has its own pitch, and
+    // combining them for a later NV12->BGR conversion needs a specific
+    // stacked layout). Returns NVSIPL_STATUS_NOT_SUPPORTED for that case
+    // for now, flagged explicitly rather than guessed at.
+    enum class FrameFormatBucket
+    {
+        BAYER_RAW,      // Bayer mosaic, any bit depth/CFA pattern
+        LUMA,           // single-plane Y8/Y10/Y12/Y16
+        RGBA,           // packed RGBA/BGRA (8-bit) or float RGBA
+        YUV_PACKED,     // single-plane packed YUV (e.g. A8Y8U8V8)
+        YUV_SEMIPLANAR, // 2-3 plane YUV (e.g. NV12) - NOT YET SUPPORTED here
+        UNKNOWN
+    };
+
+    FrameFormatBucket ClassifyFormat(const BufferAttrs &bufAttrs)
+    {
+        auto fmt = bufAttrs.planeColorFormats[0];
+
+        if (bufAttrs.planeCount >= 2U &&
+            ((fmt == NvSciColor_Y8) || (fmt == NvSciColor_Y10) ||
+             (fmt == NvSciColor_Y12) || (fmt == NvSciColor_Y16))) {
+            return FrameFormatBucket::YUV_SEMIPLANAR;
+        }
+
+        if ((bufAttrs.planeCount == 1U) &&
+            ((fmt == NvSciColor_Y8) || (fmt == NvSciColor_Y10) ||
+             (fmt == NvSciColor_Y12) || (fmt == NvSciColor_Y16))) {
+            return FrameFormatBucket::LUMA;
+        }
+
+        if ((fmt >= NvSciColor_A8Y8U8V8) && (fmt <= NvSciColor_A16Y16U16V16)) {
+            return FrameFormatBucket::YUV_PACKED;
+        }
+
+        if ((fmt == NvSciColor_Float_A16B16G16R16) ||
+            ((fmt >= NvSciColor_B8G8R8A8) && (fmt <= NvSciColor_A8B8G8R8))) {
+            return FrameFormatBucket::RGBA;
+        }
+
+        // Bayer range - mirrors CaptureRawBayerBuffer's isBayerRaw check
+        if ((bufAttrs.planeCount == 1U) &&
+            ((fmt < NvSciColor_U8V8) ||
+             (fmt == NvSciColor_X4Bayer12RGGB_RJ) ||
+             ((fmt >= NvSciColor_X6Bayer10BGGI_RGGI) &&
+              (fmt <= NvSciColor_Bayer16IGGR_IGGB)))) {
+            return FrameFormatBucket::BAYER_RAW;
+        }
+
+        return FrameFormatBucket::UNKNOWN;
+    }
+
+    // Generic single-plane extractor: works for BAYER_RAW, LUMA, RGBA,
+    // YUV_PACKED. Returns raw bytes + the metadata needed to interpret
+    // them (bytesPerPixel, width, height) - no OpenCV, caller reinterprets
+    // as needed (e.g. cast outBytes.data() to uint16_t* for bpp==2).
+    // Caller checks ClassifyFormat() first; this function trusts outBucket
+    // and does not re-validate the format range.
+    SIPLStatus CaptureFrameGeneric(INvSIPLClient::INvSIPLNvMBuffer *pNvMBuffer,
+                                    NvSciSyncCpuWaitContext cpuWaitContext,
+                                    std::vector<uint8_t> &outBytes,
+                                    int &outWidth, int &outHeight, int &outBytesPerPixel,
+                                    FrameFormatBucket &outBucket)
+    {
+        NvSciError sciErr;
+        SIPLStatus status;
+
+        if (m_outputType != INvSIPLClient::ConsumerDesc::OutputType::ICP) {
+            NvSciSyncFence fence = NvSciSyncFenceInitializer;
+            status = pNvMBuffer->GetEOFNvSciSyncFence(&fence);
+            if (status != NVSIPL_STATUS_OK) {
+                LOG_ERR("CaptureFrameGeneric: GetEOFNvSciSyncFence failed\n");
+                return status;
+            }
+            sciErr = NvSciSyncFenceWait(&fence, cpuWaitContext, FENCE_FRAME_TIMEOUT_MS * 1000UL);
+            NvSciSyncFenceClear(&fence);
+            if (sciErr != NvSciError_Success) {
+                LOG_ERR("CaptureFrameGeneric: NvSciSyncFenceWait failed (err=%d)\n", (int)sciErr);
+                return NVSIPL_STATUS_ERROR;
+            }
+        }
+
+        NvSciBufObj bufPtr = pNvMBuffer->GetNvSciBufImage();
+        BufferAttrs bufAttrs;
+        status = PopulateBufAttr(bufPtr, bufAttrs);
+        if (status != NVSIPL_STATUS_OK) {
+            LOG_ERR("CaptureFrameGeneric: PopulateBufAttr failed\n");
+            return NVSIPL_STATUS_BAD_ARGUMENT;
+        }
+
+        outBucket = ClassifyFormat(bufAttrs);
+        if (outBucket == FrameFormatBucket::YUV_SEMIPLANAR) {
+            LOG_ERR("CaptureFrameGeneric: semi-planar YUV not yet supported "
+                     "(needs multi-plane handling) - see note in code\n");
+            return NVSIPL_STATUS_NOT_SUPPORTED;
+        }
+        if (outBucket == FrameFormatBucket::UNKNOWN) {
+            LOG_ERR("CaptureFrameGeneric: unrecognized format (planeColorFormats[0]=%u)\n",
+                     (unsigned)bufAttrs.planeColorFormats[0]);
+            return NVSIPL_STATUS_NOT_SUPPORTED;
+        }
+
+        uint32_t bpp = 0U;
+        if (!CUtils::GetBpp(bufAttrs.planeBitsPerPixels[0], &bpp)) {
+            LOG_ERR("CaptureFrameGeneric: GetBpp failed\n");
+            return NVSIPL_STATUS_ERROR;
+        }
+
+        // RGBA/float-RGBA bytesPerPixel isn't derived from planeBitsPerPixels
+        // the same way (CFileWriter hardcodes 4 or 8 for these) - match that.
+        if (outBucket == FrameFormatBucket::RGBA) {
+            bpp = (bufAttrs.planeColorFormats[0] == NvSciColor_Float_A16B16G16R16) ? 8U : 4U;
+        }
+
+        uint32_t width  = bufAttrs.planeWidths[0];
+        uint32_t height = bufAttrs.planeHeights[0];
+        uint32_t pitch  = width * bpp; // tightly packed - request this exact pitch
+        uint32_t size   = pitch * height;
+
+        outBytes.resize(size);
+
+        if (bufAttrs.needSwCacheCoherency) {
+            sciErr = NvSciBufObjFlushCpuCacheRange(bufPtr, 0U, bufAttrs.planePitches[0] * height);
+            if (sciErr != NvSciError_Success) {
+                LOG_ERR("CaptureFrameGeneric: NvSciBufObjFlushCpuCacheRange failed\n");
+                return NVSIPL_STATUS_ERROR;
+            }
+        }
+
+        void     *pPixels[1] = { outBytes.data() };
+        uint32_t  sizes[1]   = { size };
+        uint32_t  pitches[1] = { pitch };
+
+        sciErr = NvSciBufObjGetPixels(bufPtr, nullptr, pPixels, sizes, pitches);
+        if (sciErr != NvSciError_Success) {
+            LOG_ERR("CaptureFrameGeneric: NvSciBufObjGetPixels failed (err=%d)\n", (int)sciErr);
+            return NVSIPL_STATUS_ERROR;
+        }
+
+        // NOTE: for YUV_PACKED, outBytes is an opaque N-byte-per-pixel blob
+        // without interpreting chroma subsampling/ordering (YUYV vs UYVY vs
+        // A8Y8U8V8 all differ) - decode downstream once we know the exact
+        // packed layout in use.
+        outWidth  = static_cast<int>(width);
+        outHeight = static_cast<int>(height);
+        outBytesPerPixel = static_cast<int>(bpp);
+
+        return NVSIPL_STATUS_OK;
+    }
+
+    // --- Gray extraction (Y8/Y10/Y12/Y16 luma) - std::vector, no OpenCV ---
+    // Delivers native pixel values as uint16_t (8-bit widened, 16-bit as-is)
+    // rather than downscaling everything to 8-bit - matches EventGenerator's
+    // uint16_t pointer-based generate() overload directly.
+    SIPLStatus ExtractGrayBuffer(INvSIPLClient::INvSIPLNvMBuffer *pNvMBuffer,
+                                  NvSciSyncCpuWaitContext cpuWaitContext,
+                                  std::vector<uint16_t> &outGray,
+                                  int &outWidth, int &outHeight, int &outStridePixels)
     {
         NvSciError sciErr;
         SIPLStatus status;
@@ -385,48 +722,63 @@ private:
 
         uint32_t width  = bufAttrs.planeWidths[0];
         uint32_t height = bufAttrs.planeHeights[0];
-        uint32_t pitch  = width * bpp;
-        uint32_t size   = pitch * height;
-
-        if ((m_pGrayExtractBuff == nullptr) || (m_uGrayExtractBuffSize < size)) {
-            delete[] m_pGrayExtractBuff;
-            m_pGrayExtractBuff = new (std::nothrow) uint8_t[size];
-            if (m_pGrayExtractBuff == nullptr) {
-                LOG_ERR("EventGenerator: out of memory allocating gray extract buffer\n");
-                m_uGrayExtractBuffSize = 0u;
-                return NVSIPL_STATUS_OUT_OF_MEMORY;
-            }
-            m_uGrayExtractBuffSize = size;
-        }
 
         if (bufAttrs.needSwCacheCoherency) {
-            sciErr = NvSciBufObjFlushCpuCacheRange(bufPtr, 0U, bufAttrs.planePitches[0] * height);
-            if (sciErr != NvSciError_Success) {
+            NvSciError flushErr = NvSciBufObjFlushCpuCacheRange(
+                bufPtr, 0U, bufAttrs.planePitches[0] * height);
+            if (flushErr != NvSciError_Success) {
                 LOG_ERR("EventGenerator: NvSciBufObjFlushCpuCacheRange failed\n");
                 return NVSIPL_STATUS_ERROR;
             }
         }
 
-        void     *pPixels[1] = { m_pGrayExtractBuff };
-        uint32_t  sizes[1]   = { size };
-        uint32_t  pitches[1] = { pitch };
+        outGray.resize(static_cast<size_t>(width) * height);
 
-        sciErr = NvSciBufObjGetPixels(bufPtr, nullptr, pPixels, sizes, pitches);
-        if (sciErr != NvSciError_Success) {
-            LOG_ERR("EventGenerator: NvSciBufObjGetPixels failed (err=%d)\n", (int)sciErr);
-            return NVSIPL_STATUS_ERROR;
-        }
+        if (bpp == 2U) {
+            // Native 16-bit - request tightly-packed pitch and write
+            // straight into the destination vector, no intermediate copy.
+            uint32_t pitch = width * bpp;
+            uint32_t size  = pitch * height;
 
-        if (bpp == 1U) {
-            cv::Mat wrapped(height, width, CV_8UC1, m_pGrayExtractBuff, pitch);
-            outGray = wrapped.clone();
-        } else if (bpp == 2U) {
-            cv::Mat wrapped16(height, width, CV_16UC1, m_pGrayExtractBuff, pitch);
-            wrapped16.convertTo(outGray, CV_8UC1, 1.0 / 256.0);
+            void     *pPixels[1] = { outGray.data() };
+            uint32_t  sizes[1]   = { size };
+            uint32_t  pitches[1] = { pitch };
+
+            sciErr = NvSciBufObjGetPixels(bufPtr, nullptr, pPixels, sizes, pitches);
+            if (sciErr != NvSciError_Success) {
+                LOG_ERR("EventGenerator: NvSciBufObjGetPixels failed (err=%d)\n", (int)sciErr);
+                return NVSIPL_STATUS_ERROR;
+            }
+        } else if (bpp == 1U) {
+            // 8-bit source: capture into a reusable byte scratch buffer,
+            // then widen into the uint16_t destination (no scaling - just
+            // a straight value copy, e.g. 200 -> 200, not 200 -> 51200).
+            uint32_t pitch = width * bpp;
+            uint32_t size  = pitch * height;
+
+            m_grayScratch8.resize(size);
+
+            void     *pPixels[1] = { m_grayScratch8.data() };
+            uint32_t  sizes[1]   = { size };
+            uint32_t  pitches[1] = { pitch };
+
+            sciErr = NvSciBufObjGetPixels(bufPtr, nullptr, pPixels, sizes, pitches);
+            if (sciErr != NvSciError_Success) {
+                LOG_ERR("EventGenerator: NvSciBufObjGetPixels failed (err=%d)\n", (int)sciErr);
+                return NVSIPL_STATUS_ERROR;
+            }
+
+            for (size_t i = 0; i < m_grayScratch8.size(); ++i) {
+                outGray[i] = static_cast<uint16_t>(m_grayScratch8[i]);
+            }
         } else {
             LOG_ERR("EventGenerator: unexpected bytesPerPixel %u\n", bpp);
             return NVSIPL_STATUS_NOT_SUPPORTED;
         }
+
+        outWidth  = static_cast<int>(width);
+        outHeight = static_cast<int>(height);
+        outStridePixels = static_cast<int>(width); // tightly packed, no row padding
 
         return NVSIPL_STATUS_OK;
     }
@@ -596,11 +948,36 @@ private:
     unique_ptr<CEventFileWriter> m_pEventFileWriter = nullptr;
     string m_sEventFilename = "";
 
-    uint8_t  *m_pGrayExtractBuff = nullptr;
-    uint32_t  m_uGrayExtractBuffSize = 0u;
+    // Scratch buffer for the bpp==1 (8-bit luma) case in ExtractGrayBuffer,
+    // reused across frames to avoid per-frame allocation.
+    std::vector<uint8_t> m_grayScratch8;
 
     // TSC ticks-per-second - ASSUMPTION, verify against platform docs (step 3)
     double m_dTscFreqHz = 31250000.0;
+
+    // --- Raw Bayer capture-for-analysis members ---
+    unique_ptr<CRawCaptureWriter> m_pRawCaptureWriter = nullptr;
+    string    m_sRawCaptureFilename = "";
+    uint32_t  m_uRawCaptureNumFrames = 10u;
+    bool      m_bRawCaptureEnabled = false;
+    bool      m_bRawCaptureDone = false;
+
+    // Helper: min/max over a uint16_t buffer, replaces cv::minMaxLoc for
+    // the debug sanity-check logs (no OpenCV dependency).
+    static void MinMaxU16(const std::vector<uint16_t> &v, uint16_t &outMin, uint16_t &outMax)
+    {
+        if (v.empty()) {
+            outMin = 0;
+            outMax = 0;
+            return;
+        }
+        outMin = v[0];
+        outMax = v[0];
+        for (uint16_t val : v) {
+            if (val < outMin) outMin = val;
+            if (val > outMax) outMax = val;
+        }
+    }
 };
 
 #endif //CNVSIPLCONSUMER_HPP
