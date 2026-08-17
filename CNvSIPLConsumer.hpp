@@ -21,6 +21,7 @@
 #include "CFileWriter.hpp"
 
 /* Event generation (evsim) */
+#include "Config.h"
 #include "EventGenerator.h"
 #include "EventPacket.h"
 #include "CEventFileWriter.hpp"
@@ -129,7 +130,7 @@ class CNvSIPLConsumer
     // --- Event generation setup (step 1 & 4) ---
     // sEventFilename: pass "" to skip binary event-file output (e.g. once
     // you move to the queue-based downstream consumer in the next step).
-    void EnableEventGeneration(const evsim::EventGenerator::Config &evConfig,
+    void EnableEventGeneration(const evsim::Config &evConfig,
                                 const string &sEventFilename = "")
     {
         m_pEventGenerator.reset(new evsim::EventGenerator(evConfig));
