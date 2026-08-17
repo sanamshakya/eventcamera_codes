@@ -40,6 +40,8 @@ public:
         int height,
         int stridePixels,
         double timestamp);
+        
+     Config config_;
 
 private:
 
@@ -53,7 +55,7 @@ private:
 
 private:
 
-    Config config_;
+    
 
     int width_ = 0;
 
