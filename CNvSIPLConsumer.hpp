@@ -446,12 +446,12 @@ private:
         BufferAttrs bufAttrs;
         status = PopulateBufAttr(bufPtr, bufAttrs);
 
-        std::cout << "Plane count : " << bufAttrs.planeCount << std::endl;
+        LOG_INFO ("Plane count : %d\n", bufAttrs.planeCount);
         for (int i = 0; i < bufAttrs.planeCount ; i++){
-            cout << "Color Format : " << bufAttrs.planeColorFormats[i] << std::endl;
-            cout << "Bits per pixel : " << bufAttrs.planeBitsPerPixels[i] << std::endl;
-            cout << "Plane Width : " << bufAttrs.planeWidths[i] << "plane Height : " << bufAttrs.planeHeights[i] << std::endl;
-            cout << "Plane Pitch : " << bufAttrs.planePitches[i] << std::endl;
+            LOG_INFO("Color Format : %d\n", bufAttrs.planeColorFormats[i]) ;
+            LOG_INFO("Bits per pixel : %d\n" ,bufAttrs.planeBitsPerPixels[i]);
+            LOG_INFO("Plane Width : %d plane Height : %d\n" ,bufAttrs.planeWidths[i] , bufAttrs.planeHeights[i]);
+            LOG_INFO("Plane Pitch : %d\n", bufAttrs.planePitches[i]);
         }
 
 
