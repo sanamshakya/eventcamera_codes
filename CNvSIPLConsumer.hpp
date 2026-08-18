@@ -265,8 +265,14 @@ class CNvSIPLConsumer
                 // stridePixels = grayWidth because our capture buffers are
                 // written tightly packed (we request pitch = width*bpp from
                 // NvSciBufObjGetPixels ourselves - see ExtractGrayBuffer).
+                int eventFrameWidth = 1280;
+                int eventFrameHeight = 720;
+                int eventFrametStride = 2560;
+                // evsim::EventPacket packet = m_pEventGenerator->generate(
+                //     raw16.data(), rawWidth, rawHeight, rawStride, timestamp);
+
                 evsim::EventPacket packet = m_pEventGenerator->generate(
-                    raw16.data(), rawWidth, rawHeight, rawStride, timestamp);
+                    raw16.data(), eventFrameWidth, eventFrameHeight, eventFrameStride, timestamp);
 
                 LOG_INFO("EventGenerator: frame %llu produced %zu events\n",
                           (unsigned long long)packet.frameNumber, packet.events.size());
