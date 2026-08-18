@@ -450,7 +450,7 @@ private:
         for (int i = 0; i < bufAttrs.planeCount ; i++){
             cout << "Color Format : " << bufAttrs.planeColorFormats[i] << std::endl;
             cout << "Bits per pixel : " << bufAttrs.planeBitsPerPixels[i] << std::endl;
-            cout << "Plane Width : " << bufAttrs.planeWidts[i] << "plane Height : " << buffAttrs.planeHeights[i] << std::endl;
+            cout << "Plane Width : " << bufAttrs.planeWidths[i] << "plane Height : " << bufAttrs.planeHeights[i] << std::endl;
             cout << "Plane Pitch : " << bufAttrs.planePitches[i] << std::endl;
         }
 
