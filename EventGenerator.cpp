@@ -137,12 +137,12 @@ namespace evsim
         const float negativeThreshold = config_.negativeThreshold;
 
         
-
+        auto t0 = std::chrono::high_resolution_clock::now();
         for (int y = 0; y < height_; ++y)
         {
             const uint16_t *row = image + static_cast<size_t>(y) * stridePixels;
 
-            auto t0 = std::chrono::high_resolution_clock::now();
+            
 
             for (int x = 0; x < width_; ++x)
             {
@@ -288,12 +288,13 @@ namespace evsim
                     pixel.referenceTime = timestamp;
                 }
             }
-            auto t1 = std::chrono::high_resolution_clock::now();
+            
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
             std::cout << "[Event generation single row time] : "
                     << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)
                            .count()
                     << "ms\n";
-        }
 
         // std::cout
         //     << "Generated Events = "
