@@ -237,66 +237,66 @@ class CNvSIPLConsumer
         }
 
         // --- Event generation (steps 1-4) ---
-        if (m_bEventGenEnabled && m_pEventGenerator != nullptr) {
+        // if (m_bEventGenEnabled && m_pEventGenerator != nullptr) {
 
-            std::vector<uint16_t> grayFrame;
-            int grayWidth = 0, grayHeight = 0, grayStride = 0;
-            auto evStatus = ExtractGrayBuffer(pNvMBuffer, cpuWaitContext,
-                                               grayFrame, grayWidth, grayHeight, grayStride);
-            if (evStatus != NVSIPL_STATUS_OK) {
-                LOG_ERR("EventGenerator: ExtractGrayBuffer failed, skipping frame\n");
-            } else {
-                if (!m_bEventGenInitialized) {
-                    LOG_INFO("EventGenerator: initializing with %d x %d\n",
-                              grayWidth, grayHeight);
-                    m_pEventGenerator->initialize(grayWidth, grayHeight);
-                    m_bEventGenInitialized = true;
+        //     std::vector<uint16_t> grayFrame;
+        //     int grayWidth = 0, grayHeight = 0, grayStride = 0;
+        //     auto evStatus = ExtractGrayBuffer(pNvMBuffer, cpuWaitContext,
+        //                                        grayFrame, grayWidth, grayHeight, grayStride);
+        //     if (evStatus != NVSIPL_STATUS_OK) {
+        //         LOG_ERR("EventGenerator: ExtractGrayBuffer failed, skipping frame\n");
+        //     } else {
+        //         if (!m_bEventGenInitialized) {
+        //             LOG_INFO("EventGenerator: initializing with %d x %d\n",
+        //                       grayWidth, grayHeight);
+        //             m_pEventGenerator->initialize(grayWidth, grayHeight);
+        //             m_bEventGenInitialized = true;
 
-                    if (!m_sEventFilename.empty()) {
-                        m_pEventFileWriter.reset(new CEventFileWriter);
-                        if (!m_pEventFileWriter->Init(m_sEventFilename,
-                                                       grayWidth, grayHeight)) {
-                            LOG_ERR("EventGenerator: failed to init event file writer\n");
-                            m_pEventFileWriter = nullptr;
-                        }
-                    }
-                }
+        //             if (!m_sEventFilename.empty()) {
+        //                 m_pEventFileWriter.reset(new CEventFileWriter);
+        //                 if (!m_pEventFileWriter->Init(m_sEventFilename,
+        //                                                grayWidth, grayHeight)) {
+        //                     LOG_ERR("EventGenerator: failed to init event file writer\n");
+        //                     m_pEventFileWriter = nullptr;
+        //                 }
+        //             }
+        //         }
 
-                // --- DEBUG: pixel-range sanity check (step 2) ---
-                // Remove once mapping is confirmed correct.
-                uint16_t minVal, maxVal;
-                MinMaxU16(grayFrame, minVal, maxVal);
-                LOG_INFO("EventGenerator: grayFrame %dx%d, pixel range [%u, %u]\n",
-                          grayWidth, grayHeight, (unsigned)minVal, (unsigned)maxVal);
+        //         // --- DEBUG: pixel-range sanity check (step 2) ---
+        //         // Remove once mapping is confirmed correct.
+        //         uint16_t minVal, maxVal;
+        //         MinMaxU16(grayFrame, minVal, maxVal);
+        //         LOG_INFO("EventGenerator: grayFrame %dx%d, pixel range [%u, %u]\n",
+        //                   grayWidth, grayHeight, (unsigned)minVal, (unsigned)maxVal);
 
-                double timestamp = static_cast<double>(md.frameCaptureTSC) / m_dTscFreqHz;
+        //         double timestamp = static_cast<double>(md.frameCaptureTSC) / m_dTscFreqHz;
 
-                // --- DEBUG: frame interval sanity check (step 3) ---
-                // Remove once TSC frequency is confirmed correct.
-                static double s_lastTimestamp = -1.0;
-                if (s_lastTimestamp >= 0.0) {
-                    LOG_INFO("EventGenerator: frame interval = %.4f s (expect ~1/fps)\n",
-                              timestamp - s_lastTimestamp);
-                }
-                s_lastTimestamp = timestamp;
+        //         // --- DEBUG: frame interval sanity check (step 3) ---
+        //         // Remove once TSC frequency is confirmed correct.
+        //         static double s_lastTimestamp = -1.0;
+        //         if (s_lastTimestamp >= 0.0) {
+        //             LOG_INFO("EventGenerator: frame interval = %.4f s (expect ~1/fps)\n",
+        //                       timestamp - s_lastTimestamp);
+        //         }
+        //         s_lastTimestamp = timestamp;
 
-                // Pointer-based overload - no OpenCV dependency.
-                // stridePixels = grayWidth because our capture buffers are
-                // written tightly packed (we request pitch = width*bpp from
-                // NvSciBufObjGetPixels ourselves - see ExtractGrayBuffer).
-                evsim::EventPacket packet = m_pEventGenerator->generate(
-                    grayFrame.data(), grayWidth, grayHeight, grayStride, timestamp);
+        //         // Pointer-based overload - no OpenCV dependency.
+        //         // stridePixels = grayWidth because our capture buffers are
+        //         // written tightly packed (we request pitch = width*bpp from
+        //         // NvSciBufObjGetPixels ourselves - see ExtractGrayBuffer).
+        //         evsim::EventPacket packet = m_pEventGenerator->generate(
+        //             grayFrame.data(), grayWidth, grayHeight, grayStride, timestamp);
 
-                LOG_INFO("EventGenerator: frame %llu produced %zu events\n",
-                          (unsigned long long)packet.frameNumber, packet.events.size());
+        //         LOG_INFO("EventGenerator: frame %llu produced %zu events\n",
+        //                   (unsigned long long)packet.frameNumber, packet.events.size());
 
-                if (m_pEventFileWriter != nullptr) {
-                    if (!m_pEventFileWriter->WriteEventPacket(packet)) {
-                        LOG_ERR("EventGenerator: event write failed\n");
-                    }
-                }
-            }
-        }
+        //         if (m_pEventFileWriter != nullptr) {
+        //             if (!m_pEventFileWriter->WriteEventPacket(packet)) {
+        //                 LOG_ERR("EventGenerator: event write failed\n");
+        //             }
+        //         }
+        //     }
+        // }
 
         if (m_pFrameFeeder != nullptr) {
             if (m_outputType == INvSIPLClient::ConsumerDesc::OutputType::ICP) {
