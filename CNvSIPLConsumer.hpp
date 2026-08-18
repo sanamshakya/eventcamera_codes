@@ -257,18 +257,22 @@ public:
                 //     }
                 // }
 
+                int eventFrameWidth = 256;
+                int eventFrameHeight = 256;
+                int eventFrameStride = 512;
+
                 if (!m_bEventGenInitialized)
                 {
                     LOG_INFO("EventGenerator: initializing with %d x %d\n",
-                             rawWidth, rawHeight);
-                    m_pEventGenerator->initialize(rawWidth, rawHeight);
+                             eventFrameWidth, eventFrameHeight);
+                    m_pEventGenerator->initialize(eventFrameWidth, eventFrameHeight);
                     m_bEventGenInitialized = true;
 
                     if (!m_sEventFilename.empty())
                     {
                         m_pEventFileWriter.reset(new CEventFileWriter);
                         if (!m_pEventFileWriter->Init(m_sEventFilename,
-                                                      rawWidth, rawHeight))
+                                                      eventFrameWidth, eventFrameHeight))
                         {
                             LOG_ERR("EventGenerator: failed to init event file writer\n");
                             m_pEventFileWriter = nullptr;
@@ -292,9 +296,7 @@ public:
                 // stridePixels = grayWidth because our capture buffers are
                 // written tightly packed (we request pitch = width*bpp from
                 // NvSciBufObjGetPixels ourselves - see ExtractGrayBuffer).
-                int eventFrameWidth = 256;
-                int eventFrameHeight = 256;
-                int eventFrameStride = 512;
+                
                 // evsim::EventPacket packet = m_pEventGenerator->generate(
                 //     raw16.data(), rawWidth, rawHeight, rawStride, timestamp);
 
