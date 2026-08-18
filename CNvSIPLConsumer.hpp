@@ -445,6 +445,16 @@ private:
         NvSciBufObj bufPtr = pNvMBuffer->GetNvSciBufImage();
         BufferAttrs bufAttrs;
         status = PopulateBufAttr(bufPtr, bufAttrs);
+
+        std::cout << "Plane count : " << bufAttrs.planeCount << std::endl;
+        for (int i = 0; i < bufAttrs.planeCount ; i++){
+            cout << "Color Format : " << bufAttrs.planeColorFormats[i] << std::endl;
+            cout << "Bits per pixel : " << bufAttrs.planeBitsPerPixels[i] << std::endl;
+            cout << "Plane Width : " << bufAttrs.planeWidts[i] << "plane Height : " << buffAttrs.planeHeights[i] << std::endl;
+            cout << "Plane Pitch : " << bufAttrs.planePitches[i] << std::endl;
+        }
+
+
         if (status != NVSIPL_STATUS_OK) {
             LOG_ERR("RawCapture: PopulateBufAttr failed\n");
             return NVSIPL_STATUS_BAD_ARGUMENT;
