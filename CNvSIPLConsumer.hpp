@@ -236,14 +236,14 @@ class CNvSIPLConsumer
 
                 if (!m_bEventGenInitialized) {
                     LOG_INFO("EventGenerator: initializing with %d x %d\n",
-                              grayWidth, grayHeight);
-                    m_pEventGenerator->initialize(grayWidth, grayHeight);
+                              rawWidth, rawHeight);
+                    m_pEventGenerator->initialize(rawWidth, rawHeight);
                     m_bEventGenInitialized = true;
 
                     if (!m_sEventFilename.empty()) {
                         m_pEventFileWriter.reset(new CEventFileWriter);
                         if (!m_pEventFileWriter->Init(m_sEventFilename,
-                                                       grayWidth, grayHeight)) {
+                                                       rawWidth, rawHeight)) {
                             LOG_ERR("EventGenerator: failed to init event file writer\n");
                             m_pEventFileWriter = nullptr;
                         }
