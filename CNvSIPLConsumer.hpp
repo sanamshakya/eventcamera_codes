@@ -315,11 +315,11 @@ public:
                            .count()
                     << "ms\n";
 
-                // if (m_pEventFileWriter != nullptr) {
-                //     if (!m_pEventFileWriter->WriteEventPacket(packet)) {
-                //         LOG_ERR("EventGenerator: event write failed\n");
-                //     }
-                // }
+                if (m_pEventFileWriter != nullptr) {
+                    if (!m_pEventFileWriter->WriteEventPacket(packet)) {
+                        LOG_ERR("EventGenerator: event write failed\n");
+                    }
+                }
             }
         }
 
