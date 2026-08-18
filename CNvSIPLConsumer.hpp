@@ -292,9 +292,9 @@ public:
                 // stridePixels = grayWidth because our capture buffers are
                 // written tightly packed (we request pitch = width*bpp from
                 // NvSciBufObjGetPixels ourselves - see ExtractGrayBuffer).
-                int eventFrameWidth = 1280;
-                int eventFrameHeight = 720;
-                int eventFrameStride = 2560;
+                int eventFrameWidth = 256;
+                int eventFrameHeight = 256;
+                int eventFrameStride = 512;
                 // evsim::EventPacket packet = m_pEventGenerator->generate(
                 //     raw16.data(), rawWidth, rawHeight, rawStride, timestamp);
 
@@ -308,10 +308,10 @@ public:
 
                 auto t1 = std::chrono::high_resolution_clock::now();
 
-                cout << "[Event generation]"
+                cout << "[Event generation] : "
                     << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)
                            .count()
-                    << "us\n";
+                    << "ms\n";
 
                 // if (m_pEventFileWriter != nullptr) {
                 //     if (!m_pEventFileWriter->WriteEventPacket(packet)) {
