@@ -120,7 +120,7 @@ class CNvSIPLConsumer
     // stops automatically. Use this FIRST, in isolation, to verify the
     // raw capture is correct via visualize_raw_bayer.py before wiring
     // raw data into EventGenerator.
-    void EnableRawCapture(const string &sFilename, uint32_t numFrames = 10)
+    void EnableRawCapture(const string &sFilename, uint32_t numFrames = 100)
     {
         m_sRawCaptureFilename = sFilename;
         m_uRawCaptureNumFrames = numFrames;
@@ -224,15 +224,15 @@ class CNvSIPLConsumer
                     }
                 }
 
-                if (m_pRawCaptureWriter != nullptr) {
-                    m_pRawCaptureWriter->WriteFrame(raw16, rawWidth, rawHeight);
-                    if (m_pRawCaptureWriter->IsDone()) {
-                        LOG_INFO("RawCapture: reached target frame count, closing capture file\n");
-                        m_pRawCaptureWriter->Deinit();
-                        m_pRawCaptureWriter = nullptr;
-                        m_bRawCaptureDone = true;
-                    }
-                }
+                // if (m_pRawCaptureWriter != nullptr) {
+                //     m_pRawCaptureWriter->WriteFrame(raw16, rawWidth, rawHeight);
+                //     if (m_pRawCaptureWriter->IsDone()) {
+                //         LOG_INFO("RawCapture: reached target frame count, closing capture file\n");
+                //         m_pRawCaptureWriter->Deinit();
+                //         m_pRawCaptureWriter = nullptr;
+                //         m_bRawCaptureDone = true;
+                //     }
+                // }
 
                 if (!m_bEventGenInitialized) {
                     LOG_INFO("EventGenerator: initializing with %d x %d\n",
@@ -271,11 +271,11 @@ class CNvSIPLConsumer
                 LOG_INFO("EventGenerator: frame %llu produced %zu events\n",
                           (unsigned long long)packet.frameNumber, packet.events.size());
 
-                if (m_pEventFileWriter != nullptr) {
-                    if (!m_pEventFileWriter->WriteEventPacket(packet)) {
-                        LOG_ERR("EventGenerator: event write failed\n");
-                    }
-                }
+                // if (m_pEventFileWriter != nullptr) {
+                //     if (!m_pEventFileWriter->WriteEventPacket(packet)) {
+                //         LOG_ERR("EventGenerator: event write failed\n");
+                //     }
+                // }
             }
         }
 
