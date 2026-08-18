@@ -257,9 +257,9 @@ public:
                 //     }
                 // }
 
-                int eventFrameWidth = 256;
-                int eventFrameHeight = 256;
-                int eventFrameStride = 512;
+                int eventFrameWidth = 1280;
+                int eventFrameHeight = 720;
+                int eventFrameStride = 2560;
 
                 if (!m_bEventGenInitialized)
                 {
