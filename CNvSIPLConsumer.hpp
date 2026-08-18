@@ -233,6 +233,49 @@ class CNvSIPLConsumer
                         m_bRawCaptureDone = true;
                     }
                 }
+
+                if (!m_bEventGenInitialized) {
+                    LOG_INFO("EventGenerator: initializing with %d x %d\n",
+                              grayWidth, grayHeight);
+                    m_pEventGenerator->initialize(grayWidth, grayHeight);
+                    m_bEventGenInitialized = true;
+
+                    if (!m_sEventFilename.empty()) {
+                        m_pEventFileWriter.reset(new CEventFileWriter);
+                        if (!m_pEventFileWriter->Init(m_sEventFilename,
+                                                       grayWidth, grayHeight)) {
+                            LOG_ERR("EventGenerator: failed to init event file writer\n");
+                            m_pEventFileWriter = nullptr;
+                        }
+                    }
+                }
+
+                double timestamp = static_cast<double>(md.frameCaptureTSC) / m_dTscFreqHz;
+
+                // --- DEBUG: frame interval sanity check (step 3) ---
+                // Remove once TSC frequency is confirmed correct.
+                static double s_lastTimestamp = -1.0;
+                if (s_lastTimestamp >= 0.0) {
+                    LOG_INFO("EventGenerator: frame interval = %.4f s (expect ~1/fps)\n",
+                              timestamp - s_lastTimestamp);
+                }
+                s_lastTimestamp = timestamp;
+
+                // Pointer-based overload - no OpenCV dependency.
+                // stridePixels = grayWidth because our capture buffers are
+                // written tightly packed (we request pitch = width*bpp from
+                // NvSciBufObjGetPixels ourselves - see ExtractGrayBuffer).
+                evsim::EventPacket packet = m_pEventGenerator->generate(
+                    raw16.data(), rawWidth, rawHeight, rawStride, timestamp);
+
+                LOG_INFO("EventGenerator: frame %llu produced %zu events\n",
+                          (unsigned long long)packet.frameNumber, packet.events.size());
+
+                if (m_pEventFileWriter != nullptr) {
+                    if (!m_pEventFileWriter->WriteEventPacket(packet)) {
+                        LOG_ERR("EventGenerator: event write failed\n");
+                    }
+                }
             }
         }
 
