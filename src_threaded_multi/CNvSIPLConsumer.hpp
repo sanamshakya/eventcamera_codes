@@ -1179,7 +1179,7 @@ private:
     std::condition_variable m_frameQueueCV;
     std::deque<PendingRawFrame> m_frameQueue;
     bool m_bStopEventProcessing = false;
-    size_t m_uMaxQueueDepth = 2; // see SetEventQueueDepth()
+    size_t m_uMaxQueueDepth = 100; // see SetEventQueueDepth()
 
     // Called from OnFrameAvailable (capture thread). Never calls
     // generate() itself - just hands the frame to the worker and returns.

@@ -11,7 +11,7 @@
     // real-time capture path -- iostream formatting/locale + endl flushes
     // are not free, and they were running on the SIPL callback thread.
 #ifndef EVSIM_VERBOSE_LOG
-#define EVSIM_VERBOSE_LOG 0
+#define EVSIM_VERBOSE_LOG 1
 #endif
 
 namespace evsim
