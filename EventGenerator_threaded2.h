@@ -1,12 +1,18 @@
 #pragma once
 
-#include <vector>
 #include <cstdint>
 
 #include "Config.h"
 #include "Event.h"
 #include "PixelState.h"
 #include "EventPacket.h"
+
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <vector>
+#include <utility>
 
 namespace evsim
 {
