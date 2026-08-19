@@ -1206,7 +1206,7 @@ private:
                 // frame reflected in the event stream for offline/
                 // dataset-quality output, raise m_uMaxQueueDepth (or fix
                 // the upstream slowness) instead of relying on drops.
-                LOG_ERR("EventGenerator: processing queue full (%zu) - "
+                LOG_INFO("EventGenerator: processing queue full (%zu) - "
                         "dropping oldest pending frame\n",
                         m_frameQueue.size());
                 m_frameQueue.pop_front();
@@ -1254,7 +1254,7 @@ private:
             }
 
             // --- TEMPORARY DIAGNOSTIC ---
-            LOG_ERR("EventGenerator: popped frame, calling generate() (queue depth now %zu)\n",
+            LOG_INFO("EventGenerator: popped frame, calling generate() (queue depth now %zu)\n",
                      m_frameQueue.size());
 
             auto t0 = std::chrono::high_resolution_clock::now();
@@ -1267,7 +1267,7 @@ private:
 
             // --- Bumped to LOG_ERR temporarily so it's visible regardless
             // of your build's log level. Revert to LOG_INFO once confirmed. ---
-            LOG_ERR("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
+            LOG_INFO("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
                      (unsigned long long)packet.frameNumber, packet.events.size(),
                      (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 
