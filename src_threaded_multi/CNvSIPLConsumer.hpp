@@ -169,6 +169,7 @@ public:
         // here, joined in Deinit().
         m_bStopEventProcessing = false;
         m_eventProcessingThread = std::thread(&CNvSIPLConsumer::EventProcessingThreadFunc, this);
+        LOG_ERR("EventGenerator: EnableEventGeneration - processing thread launched\n"); // TEMP DIAGNOSTIC
     }
 
     // Optional: cap how many un-processed raw frames may queue up before
@@ -1178,7 +1179,7 @@ private:
     std::condition_variable m_frameQueueCV;
     std::deque<PendingRawFrame> m_frameQueue;
     bool m_bStopEventProcessing = false;
-    size_t m_uMaxQueueDepth = 10; // see SetEventQueueDepth()
+    size_t m_uMaxQueueDepth = 2; // see SetEventQueueDepth()
 
     // Called from OnFrameAvailable (capture thread). Never calls
     // generate() itself - just hands the frame to the worker and returns.
@@ -1223,6 +1224,12 @@ private:
     // this touches the SIPL capture callback.
     void EventProcessingThreadFunc()
     {
+        // --- TEMPORARY DIAGNOSTIC ---
+        // Confirms the thread actually started and is alive, regardless of
+        // LOG_INFO visibility. Remove once the queue-full/no-events issue
+        // is resolved.
+        LOG_ERR("EventGenerator: processing thread started\n");
+
         while (true)
         {
             PendingRawFrame frame;
@@ -1235,13 +1242,20 @@ private:
                 if (m_frameQueue.empty())
                 {
                     if (m_bStopEventProcessing)
+                    {
+                        LOG_ERR("EventGenerator: processing thread exiting (stop requested)\n");
                         return;
+                    }
                     continue;
                 }
 
                 frame = std::move(m_frameQueue.front());
                 m_frameQueue.pop_front();
             }
+
+            // --- TEMPORARY DIAGNOSTIC ---
+            LOG_ERR("EventGenerator: popped frame, calling generate() (queue depth now %zu)\n",
+                     m_frameQueue.size());
 
             auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -1251,9 +1265,11 @@ private:
 
             auto t1 = std::chrono::high_resolution_clock::now();
 
-            LOG_INFO("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
-                      (unsigned long long)packet.frameNumber, packet.events.size(),
-                      (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+            // --- Bumped to LOG_ERR temporarily so it's visible regardless
+            // of your build's log level. Revert to LOG_INFO once confirmed. ---
+            LOG_ERR("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
+                     (unsigned long long)packet.frameNumber, packet.events.size(),
+                     (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 
             if (m_pEventFileWriter != nullptr)
             {
