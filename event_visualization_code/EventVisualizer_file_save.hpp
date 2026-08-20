@@ -123,8 +123,8 @@ private:
         m_accum.setTo(cv::Scalar(0, 0, 0));
         m_windowStart = windowEndTimestamp;
 
-        if (key == 'q' || key == 27) // ESC
-            return false;
+        //if (key == 'q' || key == 27) // ESC
+          //  return false;
         return true;
     }
 
