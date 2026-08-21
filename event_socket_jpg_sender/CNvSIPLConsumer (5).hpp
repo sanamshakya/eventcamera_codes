@@ -1379,7 +1379,9 @@ private:
             LOG_ERR("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
                      (unsigned long long)packet.frameNumber, packet.events.size(),
                      (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
-
+	
+	    //disable event file writer
+            /*
             if (m_pEventFileWriter != nullptr)
             {
                 if (!m_pEventFileWriter->WriteEventPacket(packet))
@@ -1387,6 +1389,7 @@ private:
                     LOG_ERR("EventGenerator: event write failed\n");
                 }
             }
+            */
 
 #ifdef EVSIM_ENABLE_CV_VIS
             if (m_pEventVisualizer != nullptr)
