@@ -470,6 +470,10 @@ public:
                 // the queue and calls generate() + writes the packet, so
                 // OnFrameAvailable returns to the SIPL pipeline immediately
                 // regardless of how long event generation takes.
+                LOG_ERR("RawCapture: raw16.size()=%zu, expected packed=%d, expected strided=%d\n",
+                         raw16.size(),
+                         rawWidth * rawHeight,
+                         (rawStride / (int)sizeof(uint16_t)) * rawHeight);
                 std::vector<uint16_t> eventRaw = SubsampleRawBayer(
                     raw16, rawWidth, rawHeight, rawStride,
                     eventFrameWidth, eventFrameHeight);
