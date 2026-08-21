@@ -181,7 +181,7 @@ public:
     // Fixed event-frame dimensions used both by the capture path
     // (OnFrameAvailable) and by EventVisualizer sizing below - kept in one
     // place instead of duplicated magic numbers.
-    static constexpr int kEventFrameWidth  = 3840;
+    static constexpr int kEventFrameWidth = 3840;
     static constexpr int kEventFrameHeight = 2160;
 
     void EnableEventGeneration(const evsim::Config &evConfig,
@@ -196,7 +196,7 @@ public:
         {
             m_pEventVisualizer.reset(new EventVisualizer);
             if (!m_pEventVisualizer->Init(kEventFrameWidth, kEventFrameHeight,
-                                           m_dEventVisWindowMs))
+                                          m_dEventVisWindowMs))
             {
                 LOG_ERR("EventGenerator: failed to init event visualizer\n");
                 m_pEventVisualizer = nullptr;
@@ -206,7 +206,7 @@ public:
         if (m_bEventVisEnabled)
         {
             LOG_ERR("EventGenerator: visualization requested but built "
-                     "without EVSIM_ENABLE_CV_VIS - ignoring\n");
+                    "without EVSIM_ENABLE_CV_VIS - ignoring\n");
         }
 #endif
 
@@ -215,8 +215,8 @@ public:
         {
             m_pEventUdpSender.reset(new EventUdpSender);
             if (!m_pEventUdpSender->Init(kEventFrameWidth, kEventFrameHeight,
-                                          m_sEventUdpHost, m_iEventUdpPort,
-                                          m_dEventUdpWindowMs, m_iEventUdpJpegQuality))
+                                         m_sEventUdpHost, m_iEventUdpPort,
+                                         m_dEventUdpWindowMs, m_iEventUdpJpegQuality))
             {
                 LOG_ERR("EventGenerator: failed to init event UDP sender\n");
                 m_pEventUdpSender = nullptr;
@@ -226,7 +226,7 @@ public:
         if (m_bEventUdpEnabled)
         {
             LOG_ERR("EventGenerator: UDP streaming requested but built "
-                     "without EVSIM_ENABLE_CV_UDP - ignoring\n");
+                    "without EVSIM_ENABLE_CV_UDP - ignoring\n");
         }
 #endif
 
@@ -245,12 +245,12 @@ public:
     // GTK at all). Run receive_events_udp.py on hostIp to view. Call
     // before EnableEventGeneration().
     void SetEventUdpStreaming(bool enable, const string &hostIp, int port,
-                               double accumWindowMs = 20.0, int jpegQuality = 80)
+                              double accumWindowMs = 20.0, int jpegQuality = 80)
     {
-        m_bEventUdpEnabled   = enable;
-        m_sEventUdpHost      = hostIp;
-        m_iEventUdpPort      = port;
-        m_dEventUdpWindowMs  = accumWindowMs;
+        m_bEventUdpEnabled = enable;
+        m_sEventUdpHost = hostIp;
+        m_iEventUdpPort = port;
+        m_dEventUdpWindowMs = accumWindowMs;
         m_iEventUdpJpegQuality = jpegQuality;
     }
 
@@ -334,6 +334,28 @@ public:
         return m_bFrameWriteDone;
     }
 
+    std::vector<uint16_t> SubsampleRawBayer(const std::vector<uint16_t> &src,
+                                            int srcWidth, int srcHeight, int srcStrideBytes,
+                                            int dstWidth, int dstHeight)
+    {
+        const int strideElems = srcStrideBytes / static_cast<int>(sizeof(uint16_t));
+        const int scaleX = srcWidth / dstWidth;
+        const int scaleY = srcHeight / dstHeight;
+
+        std::vector<uint16_t> dst(static_cast<size_t>(dstWidth) * dstHeight);
+
+        for (int y = 0; y < dstHeight; ++y)
+        {
+            const uint16_t *srcRow = src.data() + static_cast<size_t>(y) * scaleY * strideElems;
+            uint16_t *dstRow = dst.data() + static_cast<size_t>(y) * dstWidth;
+            for (int x = 0; x < dstWidth; ++x)
+            {
+                dstRow[x] = srcRow[x * scaleX];
+            }
+        }
+        return dst;
+    }
+
     SIPLStatus OnFrameAvailable(INvSIPLClient::INvSIPLBuffer *pBuffer,
                                 NvSciSyncCpuWaitContext cpuWaitContext)
     {
@@ -404,7 +426,7 @@ public:
 
                 int eventFrameWidth = kEventFrameWidth;
                 int eventFrameHeight = kEventFrameHeight;
-                int eventFrameStride = kEventFrameWidth*2;
+                int eventFrameStride = kEventFrameWidth * 2;
 
                 if (!m_bEventGenInitialized)
                 {
@@ -448,8 +470,12 @@ public:
                 // the queue and calls generate() + writes the packet, so
                 // OnFrameAvailable returns to the SIPL pipeline immediately
                 // regardless of how long event generation takes.
+                std::vector<uint16_t> eventRaw = SubsampleRawBayer(
+                    raw16, rawWidth, rawHeight, rawStride,
+                    eventFrameWidth, eventFrameHeight);
+
                 EnqueueRawFrame(std::move(raw16), eventFrameWidth,
-                                 eventFrameHeight, eventFrameStride, timestamp);
+                                eventFrameHeight, eventFrameStride, timestamp);
             }
         }
 
@@ -1287,13 +1313,13 @@ private:
     std::condition_variable m_frameQueueCV;
     std::deque<PendingRawFrame> m_frameQueue;
     bool m_bStopEventProcessing = false;
-    size_t m_uMaxQueueDepth = 2; // see SetEventQueueDepth()
+    size_t m_uMaxQueueDepth = 2;        // see SetEventQueueDepth()
     uint32_t m_uEventFramesPerFile = 0; // see SetEventFramesPerFile()
 
     // Called from OnFrameAvailable (capture thread). Never calls
     // generate() itself - just hands the frame to the worker and returns.
     void EnqueueRawFrame(std::vector<uint16_t> &&data, int width, int height,
-                          int stridePixels, double timestamp)
+                         int stridePixels, double timestamp)
     {
         {
             std::lock_guard<std::mutex> lock(m_frameQueueMutex);
@@ -1346,7 +1372,7 @@ private:
             {
                 std::unique_lock<std::mutex> lock(m_frameQueueMutex);
                 m_frameQueueCV.wait(lock, [&]
-                                     { return m_bStopEventProcessing || !m_frameQueue.empty(); });
+                                    { return m_bStopEventProcessing || !m_frameQueue.empty(); });
 
                 if (m_frameQueue.empty())
                 {
@@ -1364,7 +1390,7 @@ private:
 
             // --- TEMPORARY DIAGNOSTIC ---
             LOG_ERR("EventGenerator: popped frame, calling generate() (queue depth now %zu)\n",
-                     m_frameQueue.size());
+                    m_frameQueue.size());
 
             auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -1377,10 +1403,10 @@ private:
             // --- Bumped to LOG_ERR temporarily so it's visible regardless
             // of your build's log level. Revert to LOG_INFO once confirmed. ---
             LOG_ERR("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
-                     (unsigned long long)packet.frameNumber, packet.events.size(),
-                     (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
-	
-	    //disable event file writer
+                    (unsigned long long)packet.frameNumber, packet.events.size(),
+                    (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+
+            // disable event file writer
             /*
             if (m_pEventFileWriter != nullptr)
             {
@@ -1402,7 +1428,7 @@ private:
                 if (!m_pEventVisualizer->Feed(packet))
                 {
                     LOG_ERR("EventGenerator: visualization window closed, "
-                             "disabling live display\n");
+                            "disabling live display\n");
                     m_pEventVisualizer->Deinit();
                     m_pEventVisualizer = nullptr;
                 }
@@ -1426,17 +1452,17 @@ private:
 #ifdef EVSIM_ENABLE_CV_VIS
     unique_ptr<EventVisualizer> m_pEventVisualizer = nullptr;
 #endif
-    bool   m_bEventVisEnabled = false;   // see SetEventVisualization()
-    double m_dEventVisWindowMs = 20.0;   // see SetEventVisualization()
+    bool m_bEventVisEnabled = false;   // see SetEventVisualization()
+    double m_dEventVisWindowMs = 20.0; // see SetEventVisualization()
 
 #ifdef EVSIM_ENABLE_CV_UDP
     unique_ptr<EventUdpSender> m_pEventUdpSender = nullptr;
 #endif
-    bool   m_bEventUdpEnabled = false;      // see SetEventUdpStreaming()
+    bool m_bEventUdpEnabled = false; // see SetEventUdpStreaming()
     string m_sEventUdpHost = "";
-    int    m_iEventUdpPort = 5005;
+    int m_iEventUdpPort = 5005;
     double m_dEventUdpWindowMs = 20.0;
-    int    m_iEventUdpJpegQuality = 80;
+    int m_iEventUdpJpegQuality = 80;
 
     // Scratch buffer for the bpp==1 (8-bit luma) case in ExtractGrayBuffer,
     // reused across frames to avoid per-frame allocation.
