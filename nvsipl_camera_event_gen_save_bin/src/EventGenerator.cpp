@@ -11,7 +11,7 @@
     // real-time capture path -- iostream formatting/locale + endl flushes
     // are not free, and they were running on the SIPL callback thread.
 #ifndef EVSIM_VERBOSE_LOG
-#define EVSIM_VERBOSE_LOG 0
+#define EVSIM_VERBOSE_LOG 1
 #endif
 
 namespace evsim
@@ -342,6 +342,8 @@ namespace evsim
             pendingWorkers_.store(static_cast<int>(numThreads_), std::memory_order_release);
             ++generation_;
         }
+        std::cerr << "[EventGenerator] dispatching to " << numThreads_ << " workers, gen="
+                  << generation_ << std::endl; // TEMP DIAGNOSTIC
         cvStart_.notify_all();
 
         {
@@ -349,6 +351,7 @@ namespace evsim
             cvDone_.wait(lock, [&]
                          { return pendingWorkers_.load(std::memory_order_acquire) == 0; });
         }
+        std::cerr << "[EventGenerator] pool wait complete, gen=" << generation_ << std::endl; // TEMP DIAGNOSTIC
 
         //------------------------------------------
         // Merge. Threads own contiguous, increasing row ranges, so

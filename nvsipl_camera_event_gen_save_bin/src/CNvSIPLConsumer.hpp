@@ -15,6 +15,11 @@
 #include <cmath>
 #include <vector>
 #include <chrono>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <deque>
 
 #include "NvSIPLClient.hpp"
 #include "CProfiler.hpp"
@@ -98,6 +103,21 @@ public:
             m_pFileWriter = nullptr;
         }
 
+        // --- Stop the async event-processing worker first ---
+        // Signal + wake the thread, let it drain whatever's already
+        // queued (so we don't silently lose the last few frames on
+        // shutdown), then join. Must happen before m_pEventFileWriter is
+        // torn down below, since the worker writes through it.
+        if (m_eventProcessingThread.joinable())
+        {
+            {
+                std::lock_guard<std::mutex> lock(m_frameQueueMutex);
+                m_bStopEventProcessing = true;
+            }
+            m_frameQueueCV.notify_all();
+            m_eventProcessingThread.join();
+        }
+
         // --- Event generation cleanup (step 1-4) ---
         // (capture buffers are std::vector members - no manual free needed)
         if (m_pEventFileWriter != nullptr)
@@ -143,6 +163,34 @@ public:
         m_pEventGenerator.reset(new evsim::EventGenerator(evConfig));
         m_sEventFilename = sEventFilename;
         m_bEventGenEnabled = true;
+
+        // Start the dedicated worker that drains m_frameQueue and runs
+        // generate() off the SIPL capture-callback thread. Started once
+        // here, joined in Deinit().
+        m_bStopEventProcessing = false;
+        m_eventProcessingThread = std::thread(&CNvSIPLConsumer::EventProcessingThreadFunc, this);
+        LOG_ERR("EventGenerator: EnableEventGeneration - processing thread launched\n"); // TEMP DIAGNOSTIC
+    }
+
+    // Optional: how many EventPacket frames go into one output file before
+    // CEventFileWriter rotates to a new one. 1 = one file per frame
+    // (default). 0 = old behaviour, single file for the whole run. Call
+    // before EnableEventGeneration() if you want a value other than the
+    // default.
+    void SetEventFramesPerFile(uint32_t framesPerFile)
+    {
+        m_uEventFramesPerFile = framesPerFile;
+    }
+
+    // Optional: cap how many un-processed raw frames may queue up before
+    // OnFrameAvailable starts dropping the oldest one. Bigger = more
+    // tolerance for generate() briefly falling behind capture, at the cost
+    // of higher worst-case latency between capture and the resulting
+    // event packet. Call before EnableEventGeneration() if you want a
+    // value other than the default.
+    void SetEventQueueDepth(size_t depth)
+    {
+        m_uMaxQueueDepth = depth;
     }
 
     // TSC ticks-per-second for this platform (step 3).
@@ -272,7 +320,8 @@ public:
                     {
                         m_pEventFileWriter.reset(new CEventFileWriter);
                         if (!m_pEventFileWriter->Init(m_sEventFilename,
-                                                      eventFrameWidth, eventFrameHeight))
+                                                      eventFrameWidth, eventFrameHeight,
+                                                      m_uEventFramesPerFile))
                         {
                             LOG_ERR("EventGenerator: failed to init event file writer\n");
                             m_pEventFileWriter = nullptr;
@@ -292,34 +341,18 @@ public:
                 }
                 s_lastTimestamp = timestamp;
 
-                // Pointer-based overload - no OpenCV dependency.
-                // stridePixels = grayWidth because our capture buffers are
-                // written tightly packed (we request pitch = width*bpp from
-                // NvSciBufObjGetPixels ourselves - see ExtractGrayBuffer).
-                
-                // evsim::EventPacket packet = m_pEventGenerator->generate(
-                //     raw16.data(), rawWidth, rawHeight, rawStride, timestamp);
-
-                auto t0 = std::chrono::high_resolution_clock::now();
-
-                evsim::EventPacket packet = m_pEventGenerator->generate(
-                    raw16.data(), eventFrameWidth, eventFrameHeight, eventFrameStride, timestamp);
-
-                LOG_INFO("EventGenerator: frame %llu produced %zu events\n",
-                         (unsigned long long)packet.frameNumber, packet.events.size());
-
-                auto t1 = std::chrono::high_resolution_clock::now();
-
-                cout << "[Event generation] : "
-                    << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)
-                           .count()
-                    << "ms\n";
-
-                if (m_pEventFileWriter != nullptr) {
-                    if (!m_pEventFileWriter->WriteEventPacket(packet)) {
-                        LOG_ERR("EventGenerator: event write failed\n");
-                    }
-                }
+                // --- Decouple event generation from the capture callback ---
+                // generate() is no longer called here. raw16 is a plain
+                // std::vector<uint16_t> CPU copy (already extracted from
+                // the NvSciBuf via NvSciBufObjGetPixels in
+                // CaptureRawBayerBuffer), so it's safe to move it onto a
+                // queue with no NvSciBuf/refcounting concerns - it doesn't
+                // alias pBuffer at all. A dedicated worker thread drains
+                // the queue and calls generate() + writes the packet, so
+                // OnFrameAvailable returns to the SIPL pipeline immediately
+                // regardless of how long event generation takes.
+                EnqueueRawFrame(std::move(raw16), eventFrameWidth,
+                                 eventFrameHeight, eventFrameStride, timestamp);
             }
         }
 
@@ -1137,6 +1170,128 @@ private:
     unique_ptr<evsim::EventGenerator> m_pEventGenerator = nullptr;
     bool m_bEventGenEnabled = false;
     bool m_bEventGenInitialized = false;
+
+    // --- Async event-generation queue/worker ---
+    // Holds one already-extracted CPU frame. No NvSciBuf/pBuffer reference
+    // in here at all, so there's nothing to AddRef/Release - the data is
+    // fully owned by whichever side (capture thread vs. queue vs. worker)
+    // currently holds it, and std::move hands ownership across cleanly.
+    struct PendingRawFrame
+    {
+        std::vector<uint16_t> data;
+        int width = 0;
+        int height = 0;
+        int stridePixels = 0;
+        double timestamp = 0.0;
+    };
+
+    std::thread m_eventProcessingThread;
+    std::mutex m_frameQueueMutex;
+    std::condition_variable m_frameQueueCV;
+    std::deque<PendingRawFrame> m_frameQueue;
+    bool m_bStopEventProcessing = false;
+    size_t m_uMaxQueueDepth = 2; // see SetEventQueueDepth()
+    uint32_t m_uEventFramesPerFile = 1; // see SetEventFramesPerFile()
+
+    // Called from OnFrameAvailable (capture thread). Never calls
+    // generate() itself - just hands the frame to the worker and returns.
+    void EnqueueRawFrame(std::vector<uint16_t> &&data, int width, int height,
+                          int stridePixels, double timestamp)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_frameQueueMutex);
+
+            if (m_frameQueue.size() >= m_uMaxQueueDepth)
+            {
+                // generate() is falling behind capture. Dropping the
+                // OLDEST queued frame (rather than the incoming one, and
+                // rather than blocking here) keeps the queue bounded and
+                // keeps event output as close to real-time as possible.
+                //
+                // Semantics: EventGenerator diffs each pixel against
+                // whatever reference frame it last processed, so this
+                // does not corrupt the output - it just means the next
+                // processed frame's delta spans a longer time window,
+                // producing a burst of crossings at that frame's
+                // timestamp instead of evenly spaced ones. Fine for
+                // near-real-time monitoring; if you need every capture
+                // frame reflected in the event stream for offline/
+                // dataset-quality output, raise m_uMaxQueueDepth (or fix
+                // the upstream slowness) instead of relying on drops.
+                LOG_ERR("EventGenerator: processing queue full (%zu) - "
+                        "dropping oldest pending frame\n",
+                        m_frameQueue.size());
+                m_frameQueue.pop_front();
+            }
+
+            m_frameQueue.push_back(
+                PendingRawFrame{std::move(data), width, height, stridePixels, timestamp});
+        }
+        m_frameQueueCV.notify_one();
+    }
+
+    // Runs on its own thread for the lifetime of event generation. Pops
+    // frames, calls generate() (which internally uses EventGenerator's own
+    // row-partitioned thread pool), writes the resulting packet. None of
+    // this touches the SIPL capture callback.
+    void EventProcessingThreadFunc()
+    {
+        // --- TEMPORARY DIAGNOSTIC ---
+        // Confirms the thread actually started and is alive, regardless of
+        // LOG_INFO visibility. Remove once the queue-full/no-events issue
+        // is resolved.
+        LOG_ERR("EventGenerator: processing thread started\n");
+
+        while (true)
+        {
+            PendingRawFrame frame;
+
+            {
+                std::unique_lock<std::mutex> lock(m_frameQueueMutex);
+                m_frameQueueCV.wait(lock, [&]
+                                     { return m_bStopEventProcessing || !m_frameQueue.empty(); });
+
+                if (m_frameQueue.empty())
+                {
+                    if (m_bStopEventProcessing)
+                    {
+                        LOG_ERR("EventGenerator: processing thread exiting (stop requested)\n");
+                        return;
+                    }
+                    continue;
+                }
+
+                frame = std::move(m_frameQueue.front());
+                m_frameQueue.pop_front();
+            }
+
+            // --- TEMPORARY DIAGNOSTIC ---
+            LOG_ERR("EventGenerator: popped frame, calling generate() (queue depth now %zu)\n",
+                     m_frameQueue.size());
+
+            auto t0 = std::chrono::high_resolution_clock::now();
+
+            evsim::EventPacket packet = m_pEventGenerator->generate(
+                frame.data.data(), frame.width, frame.height,
+                frame.stridePixels, frame.timestamp);
+
+            auto t1 = std::chrono::high_resolution_clock::now();
+
+            // --- Bumped to LOG_ERR temporarily so it's visible regardless
+            // of your build's log level. Revert to LOG_INFO once confirmed. ---
+            LOG_ERR("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
+                     (unsigned long long)packet.frameNumber, packet.events.size(),
+                     (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+
+            if (m_pEventFileWriter != nullptr)
+            {
+                if (!m_pEventFileWriter->WriteEventPacket(packet))
+                {
+                    LOG_ERR("EventGenerator: event write failed\n");
+                }
+            }
+        }
+    }
 
     unique_ptr<CEventFileWriter> m_pEventFileWriter = nullptr;
     string m_sEventFilename = "";
