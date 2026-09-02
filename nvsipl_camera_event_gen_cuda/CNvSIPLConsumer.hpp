@@ -28,11 +28,13 @@
 
 /* Event generation (evsim) */
 #include "Config.h"
+#include "IEventGenerator.h"
 #include "EventGenerator.h"
+#ifdef EVSIM_ENABLE_CUDA
+#include "EventGeneratorCUDA.cuh"
+#endif
 #include "EventPacket.h"
 #include "CEventFileWriter.hpp"
-#include "EventVisualizer.hpp"
-#include "EventUdpSender.hpp"
 #include "CRawCaptureWriter.hpp"
 
 #if !NV_IS_SAFETY
@@ -128,25 +130,6 @@ public:
             m_pEventFileWriter = nullptr;
         }
 
-#ifdef EVSIM_ENABLE_CV_VIS
-        // Only ever touched from m_eventProcessingThread (see Feed() calls
-        // above), which has already been joined by this point, so no
-        // additional synchronization is needed here.
-        if (m_pEventVisualizer != nullptr)
-        {
-            m_pEventVisualizer->Deinit();
-            m_pEventVisualizer = nullptr;
-        }
-#endif
-
-#ifdef EVSIM_ENABLE_CV_UDP
-        if (m_pEventUdpSender != nullptr)
-        {
-            m_pEventUdpSender->Deinit();
-            m_pEventUdpSender = nullptr;
-        }
-#endif
-
         // --- Raw capture cleanup ---
         if (m_pRawCaptureWriter != nullptr)
         {
@@ -178,105 +161,46 @@ public:
     // --- Event generation setup (step 1 & 4) ---
     // sEventFilename: pass "" to skip binary event-file output (e.g. once
     // you move to the queue-based downstream consumer in the next step).
-    // Fixed event-frame dimensions used both by the capture path
-    // (OnFrameAvailable) and by EventVisualizer sizing below - kept in one
-    // place instead of duplicated magic numbers.
-    static constexpr int kEventFrameWidth  = 1280;
-    static constexpr int kEventFrameHeight = 720;
-
+    // useCuda: build the GPU (EventGeneratorCUDA) backend instead of the
+    // CPU row-threaded one. Requires the binary to be built with
+    // EVSIM_ENABLE_CUDA defined (and linked/compiled with nvcc) - see the
+    // #ifdef around the EventGeneratorCUDA.cuh include above. Both
+    // backends implement IEventGenerator, so everything downstream
+    // (m_pEventGenerator->initialize()/generate(), the event-processing
+    // thread, the file writer) is unaffected by which one you pick.
+    // maxEventsPerFrame only matters for the CUDA backend - see the note
+    // on EventGeneratorCUDA's constructor about sizing it for your scene's
+    // worst-case motion.
     void EnableEventGeneration(const evsim::Config &evConfig,
-                               const string &sEventFilename = "")
+                               const string &sEventFilename = "",
+                               bool useCuda = false,
+                               int maxEventsPerFrame = 200000)
     {
-        m_pEventGenerator.reset(new evsim::EventGenerator(evConfig));
+#ifdef EVSIM_ENABLE_CUDA
+        if (useCuda)
+        {
+            m_pEventGenerator.reset(new evsim::EventGeneratorCUDA(evConfig, maxEventsPerFrame));
+        }
+        else
+#else
+        if (useCuda)
+        {
+            LOG_ERR("EventGenerator: useCuda requested but this binary was built "
+                    "without EVSIM_ENABLE_CUDA - falling back to the CPU backend\n");
+        }
+        (void)maxEventsPerFrame;
+#endif
+        {
+            m_pEventGenerator.reset(new evsim::EventGenerator(evConfig));
+        }
         m_sEventFilename = sEventFilename;
         m_bEventGenEnabled = true;
-
-#ifdef EVSIM_ENABLE_CV_VIS
-        if (m_bEventVisEnabled)
-        {
-            m_pEventVisualizer.reset(new EventVisualizer);
-            if (!m_pEventVisualizer->Init(kEventFrameWidth, kEventFrameHeight,
-                                           m_dEventVisWindowMs))
-            {
-                LOG_ERR("EventGenerator: failed to init event visualizer\n");
-                m_pEventVisualizer = nullptr;
-            }
-        }
-#else
-        if (m_bEventVisEnabled)
-        {
-            LOG_ERR("EventGenerator: visualization requested but built "
-                     "without EVSIM_ENABLE_CV_VIS - ignoring\n");
-        }
-#endif
-
-#ifdef EVSIM_ENABLE_CV_UDP
-        if (m_bEventUdpEnabled)
-        {
-            m_pEventUdpSender.reset(new EventUdpSender);
-            if (!m_pEventUdpSender->Init(kEventFrameWidth, kEventFrameHeight,
-                                          m_sEventUdpHost, m_iEventUdpPort,
-                                          m_dEventUdpWindowMs, m_iEventUdpJpegQuality))
-            {
-                LOG_ERR("EventGenerator: failed to init event UDP sender\n");
-                m_pEventUdpSender = nullptr;
-            }
-        }
-#else
-        if (m_bEventUdpEnabled)
-        {
-            LOG_ERR("EventGenerator: UDP streaming requested but built "
-                     "without EVSIM_ENABLE_CV_UDP - ignoring\n");
-        }
-#endif
 
         // Start the dedicated worker that drains m_frameQueue and runs
         // generate() off the SIPL capture-callback thread. Started once
         // here, joined in Deinit().
         m_bStopEventProcessing = false;
         m_eventProcessingThread = std::thread(&CNvSIPLConsumer::EventProcessingThreadFunc, this);
-        LOG_ERR("EventGenerator: EnableEventGeneration - processing thread launched\n"); // TEMP DIAGNOSTIC
-    }
-
-    // Optional: stream accumulated event frames as JPEG-over-UDP to a host
-    // PC instead of (or alongside) local display - use this on targets
-    // where EVSIM_ENABLE_CV_VIS/imshow fails due to a missing GTK runtime.
-    // Only needs EVSIM_ENABLE_CV_UDP (core+imgproc+imgcodecs, no highgui/
-    // GTK at all). Run receive_events_udp.py on hostIp to view. Call
-    // before EnableEventGeneration().
-    void SetEventUdpStreaming(bool enable, const string &hostIp, int port,
-                               double accumWindowMs = 20.0, int jpegQuality = 80)
-    {
-        m_bEventUdpEnabled   = enable;
-        m_sEventUdpHost      = hostIp;
-        m_iEventUdpPort      = port;
-        m_dEventUdpWindowMs  = accumWindowMs;
-        m_iEventUdpJpegQuality = jpegQuality;
-    }
-
-    // Optional: turn on a live OpenCV accumulation display of the event
-    // stream (red=ON, blue=OFF, matching visualize_events_multi_accum.py).
-    // Only takes effect if built with -DEVSIM_ENABLE_CV_VIS; otherwise it's
-    // a harmless no-op so this call is always safe to leave in place.
-    // accumWindowMs controls how much event-timestamp time is accumulated
-    // between refreshes (20ms is a reasonable starting point). Call before
-    // EnableEventGeneration().
-    void SetEventVisualization(bool enable, double accumWindowMs = 20.0)
-    {
-        m_bEventVisEnabled = enable;
-        m_dEventVisWindowMs = accumWindowMs;
-    }
-
-    // Optional: how many EventPacket frames go into one output file before
-    // CEventFileWriter rotates to a new one. 0 = default: a single
-    // continuous file for the whole run, with a FrameHeader (frame number,
-    // start/end time, event count) written before each frame's records so
-    // frame boundaries are still identifiable without separate files. 1 =
-    // one file per frame; N>1 = batch N frames per file. Call before
-    // EnableEventGeneration() if you want a value other than the default.
-    void SetEventFramesPerFile(uint32_t framesPerFile)
-    {
-        m_uEventFramesPerFile = framesPerFile;
     }
 
     // Optional: cap how many un-processed raw frames may queue up before
@@ -333,28 +257,6 @@ public:
     {
         return m_bFrameWriteDone;
     }
-    
-    // srcTop must point at the first row of the buffer to downscale. Now
-    // always called with the FULL captured frame (raw16.data()), not an
-    // active-region ROI - see OnFrameAvailable.
-static void DownscaleRaw16Box3x3(const uint16_t *srcTop, int srcStride,
-                                  int dstWidth, int dstHeight,
-                                  std::vector<uint16_t> &dst)
-{
-    dst.resize(static_cast<size_t>(dstWidth) * dstHeight);
-    for (int dy = 0; dy < dstHeight; ++dy) {
-        const int sy0 = dy * 3;
-        for (int dx = 0; dx < dstWidth; ++dx) {
-            const int sx0 = dx * 3;
-            uint32_t sum = 0;
-            for (int j = 0; j < 3; ++j) {
-                const uint16_t *row = srcTop + static_cast<size_t>(sy0 + j) * srcStride;
-                sum += row[sx0 + 0] + row[sx0 + 1] + row[sx0 + 2];
-            }
-            dst[dy * dstWidth + dx] = static_cast<uint16_t>(sum / 9);
-        }
-    }
-}
 
     SIPLStatus OnFrameAvailable(INvSIPLClient::INvSIPLBuffer *pBuffer,
                                 NvSciSyncCpuWaitContext cpuWaitContext)
@@ -366,6 +268,9 @@ static void DownscaleRaw16Box3x3(const uint16_t *srcTop, int srcStride,
             return NVSIPL_STATUS_ERROR;
         }
         const auto &md = pNvMBuffer->GetImageData();
+        auto &EmdData = pNvMBuffer->GetImageEmbeddedData();
+        LOG_INFO("EmdData.embeddedBufTopSize: %u EmdData.embeddedBufBottomSize: %u\n",
+                 EmdData.embeddedBufTopSize, EmdData.embeddedBufBottomSize);
 
         // Send to profiler
         if (m_pProfiler != nullptr)
@@ -421,8 +326,9 @@ static void DownscaleRaw16Box3x3(const uint16_t *srcTop, int srcStride,
                 //     }
                 // }
 
-                int eventFrameWidth = kEventFrameWidth;
-                int eventFrameHeight = kEventFrameHeight;
+                int eventFrameWidth = 1280;
+                int eventFrameHeight = 720;
+                int eventFrameStride = 2560;
 
                 if (!m_bEventGenInitialized)
                 {
@@ -435,8 +341,7 @@ static void DownscaleRaw16Box3x3(const uint16_t *srcTop, int srcStride,
                     {
                         m_pEventFileWriter.reset(new CEventFileWriter);
                         if (!m_pEventFileWriter->Init(m_sEventFilename,
-                                                      eventFrameWidth, eventFrameHeight,
-                                                      m_uEventFramesPerFile))
+                                                      eventFrameWidth, eventFrameHeight))
                         {
                             LOG_ERR("EventGenerator: failed to init event file writer\n");
                             m_pEventFileWriter = nullptr;
@@ -466,35 +371,8 @@ static void DownscaleRaw16Box3x3(const uint16_t *srcTop, int srcStride,
                 // the queue and calls generate() + writes the packet, so
                 // OnFrameAvailable returns to the SIPL pipeline immediately
                 // regardless of how long event generation takes.
-                //
-                // Downscale the FULL captured frame - not just an active
-                // ROI (that top/bottom-padding crop is gone; any padding
-                // rows are simply box-averaged in along with everything
-                // else). Requires rawWidth/rawHeight to be at least
-                // 3x the target event-frame size, since
-                // DownscaleRaw16Box3x3 does a fixed 3x3 box reduction; if
-                // your sensor's raw resolution isn't a clean 3x multiple
-                // of kEventFrameWidth/Height, replace it with a general
-                // resize instead of adding a stricter guard here.
-                if (rawWidth < eventFrameWidth * 3 || rawHeight < eventFrameHeight * 3)
-                {
-                    LOG_ERR("EventGenerator: raw frame %dx%d too small to downscale to "
-                            "%dx%d (need >= %dx%d) - skipping frame\n",
-                            rawWidth, rawHeight, eventFrameWidth, eventFrameHeight,
-                            eventFrameWidth * 3, eventFrameHeight * 3);
-                }
-                else
-                {
-                    std::vector<uint16_t> eventFrame;
-                    DownscaleRaw16Box3x3(raw16.data(), rawStride,
-                                          eventFrameWidth, eventFrameHeight, eventFrame);
-
-                    // eventFrame is tightly packed at eventFrameWidth wide
-                    // -> stride == width.
-                    EnqueueRawFrame(std::move(eventFrame), eventFrameWidth,
-                                     eventFrameHeight, /*stridePixels=*/eventFrameWidth,
-                                     timestamp);
-                }
+                EnqueueRawFrame(std::move(raw16), eventFrameWidth,
+                                 eventFrameHeight, eventFrameStride, timestamp);
             }
         }
 
@@ -1309,7 +1187,9 @@ private:
     bool m_bShowMetadata = false;
 
     // --- Event generation members (steps 1-4) ---
-    unique_ptr<evsim::EventGenerator> m_pEventGenerator = nullptr;
+    // Held as the common interface so this compiles/links the same way
+    // whether EnableEventGeneration() picked the CPU or CUDA backend.
+    unique_ptr<evsim::IEventGenerator> m_pEventGenerator = nullptr;
     bool m_bEventGenEnabled = false;
     bool m_bEventGenInitialized = false;
 
@@ -1332,8 +1212,7 @@ private:
     std::condition_variable m_frameQueueCV;
     std::deque<PendingRawFrame> m_frameQueue;
     bool m_bStopEventProcessing = false;
-    size_t m_uMaxQueueDepth = 2; // see SetEventQueueDepth()
-    uint32_t m_uEventFramesPerFile = 0; // see SetEventFramesPerFile()
+    size_t m_uMaxQueueDepth = 10; // see SetEventQueueDepth()
 
     // Called from OnFrameAvailable (capture thread). Never calls
     // generate() itself - just hands the frame to the worker and returns.
@@ -1378,12 +1257,6 @@ private:
     // this touches the SIPL capture callback.
     void EventProcessingThreadFunc()
     {
-        // --- TEMPORARY DIAGNOSTIC ---
-        // Confirms the thread actually started and is alive, regardless of
-        // LOG_INFO visibility. Remove once the queue-full/no-events issue
-        // is resolved.
-        LOG_ERR("EventGenerator: processing thread started\n");
-
         while (true)
         {
             PendingRawFrame frame;
@@ -1396,20 +1269,13 @@ private:
                 if (m_frameQueue.empty())
                 {
                     if (m_bStopEventProcessing)
-                    {
-                        LOG_ERR("EventGenerator: processing thread exiting (stop requested)\n");
                         return;
-                    }
                     continue;
                 }
 
                 frame = std::move(m_frameQueue.front());
                 m_frameQueue.pop_front();
             }
-
-            // --- TEMPORARY DIAGNOSTIC ---
-            LOG_ERR("EventGenerator: popped frame, calling generate() (queue depth now %zu)\n",
-                     m_frameQueue.size());
 
             auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -1419,14 +1285,10 @@ private:
 
             auto t1 = std::chrono::high_resolution_clock::now();
 
-            // --- Bumped to LOG_ERR temporarily so it's visible regardless
-            // of your build's log level. Revert to LOG_INFO once confirmed. ---
-            LOG_ERR("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
-                     (unsigned long long)packet.frameNumber, packet.events.size(),
-                     (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
-	
-	    //disable event file writer
-            /*
+            LOG_INFO("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
+                      (unsigned long long)packet.frameNumber, packet.events.size(),
+                      (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+
             if (m_pEventFileWriter != nullptr)
             {
                 if (!m_pEventFileWriter->WriteEventPacket(packet))
@@ -1434,54 +1296,11 @@ private:
                     LOG_ERR("EventGenerator: event write failed\n");
                 }
             }
-            */
-
-#ifdef EVSIM_ENABLE_CV_VIS
-            if (m_pEventVisualizer != nullptr)
-            {
-                // Runs on this dedicated thread only - never the capture
-                // callback - so cv::imshow/waitKey latency can't stall
-                // OnFrameAvailable. If the window was closed or 'q'/ESC
-                // was pressed, stop feeding it (leave file writing, if
-                // any, running).
-                if (!m_pEventVisualizer->Feed(packet))
-                {
-                    LOG_ERR("EventGenerator: visualization window closed, "
-                             "disabling live display\n");
-                    m_pEventVisualizer->Deinit();
-                    m_pEventVisualizer = nullptr;
-                }
-            }
-#endif
-
-#ifdef EVSIM_ENABLE_CV_UDP
-            if (m_pEventUdpSender != nullptr)
-            {
-                // Also on this async thread - encode+sendto() latency
-                // can't stall capture either.
-                m_pEventUdpSender->Feed(packet);
-            }
-#endif
         }
     }
 
     unique_ptr<CEventFileWriter> m_pEventFileWriter = nullptr;
     string m_sEventFilename = "";
-
-#ifdef EVSIM_ENABLE_CV_VIS
-    unique_ptr<EventVisualizer> m_pEventVisualizer = nullptr;
-#endif
-    bool   m_bEventVisEnabled = false;   // see SetEventVisualization()
-    double m_dEventVisWindowMs = 20.0;   // see SetEventVisualization()
-
-#ifdef EVSIM_ENABLE_CV_UDP
-    unique_ptr<EventUdpSender> m_pEventUdpSender = nullptr;
-#endif
-    bool   m_bEventUdpEnabled = false;      // see SetEventUdpStreaming()
-    string m_sEventUdpHost = "";
-    int    m_iEventUdpPort = 5005;
-    double m_dEventUdpWindowMs = 20.0;
-    int    m_iEventUdpJpegQuality = 80;
 
     // Scratch buffer for the bpp==1 (8-bit luma) case in ExtractGrayBuffer,
     // reused across frames to avoid per-frame allocation.
