@@ -63,6 +63,10 @@ __global__ void GenerateEventsKernel(PixelStateGPU *states,
 
     const int idx = y * width + x;
     PixelStateGPU state = states[idx];
+    
+    if (idx == 0) {
+        printf("[CUDA KERNEL LOG] Running cuda kernel  %d\n", idx);
+    }
 
     const float currentIntensity = static_cast<float>(image[static_cast<size_t>(y) * stride + x]);
     const float delta = currentIntensity - state.referenceIntensity;

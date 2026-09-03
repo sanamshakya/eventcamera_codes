@@ -180,6 +180,7 @@ public:
         if (useCuda)
         {
             m_pEventGenerator.reset(new evsim::EventGeneratorCUDA(evConfig, maxEventsPerFrame));
+            LOG_ERR("EventGenerator: useCuda enabled, running cuda based event generator\n");
         }
         else
 #else
@@ -356,7 +357,7 @@ public:
                 static double s_lastTimestamp = -1.0;
                 if (s_lastTimestamp >= 0.0)
                 {
-                    LOG_INFO("EventGenerator: frame interval = %.4f s (expect ~1/fps)\n",
+                    LOG_ERR("EventGenerator: frame interval = %.4f s (expect ~1/fps)\n",
                              timestamp - s_lastTimestamp);
                 }
                 s_lastTimestamp = timestamp;
@@ -1285,7 +1286,7 @@ private:
 
             auto t1 = std::chrono::high_resolution_clock::now();
 
-            LOG_INFO("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
+            LOG_ERR("EventGenerator: frame %llu produced %zu events (%lld ms)\n",
                       (unsigned long long)packet.frameNumber, packet.events.size(),
                       (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 
