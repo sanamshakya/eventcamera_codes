@@ -30,11 +30,11 @@ struct Config
 
     std::string outputCSV = "events.csv";
     
-    std::string sensorType = "Raw2DVS346";
+    std::string sensorType = "Raw2DVS346"; //Model parameters for event cameras
     
-    bool fastDeterministicMode = false;
+    bool fastDeterministicMode = false; //for enabling and disabling stochastic mode
     
-    double contrastThresholdOn = 1.0;
+    double contrastThresholdOn = 1.0; //threshold values for polarity and time stamp estimation
     double contrastThresholdOff = 1.0;
 };
 

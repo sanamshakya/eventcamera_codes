@@ -131,6 +131,40 @@ EventProcessingThreadFunc()
                 frame.stridePixels, frame.timestamp);
 	...
 	```
+
+## Code Update for stochastic event generator 
+- In `EventGeneratorCUDA.cu`, two event generation logic is implemented : 
+	1) Deterministic : Similar to previous but considering camera parameters
+	```
+	void GenerateEventsKernelDVSFast(
+    PixelStateGPU *states,
+    const uint16_t *image,
+    int width, int height, int stride,
+    float k1_over_dt_us,   // k1 / dt_frame_in_microseconds -- see the .cu note on units
+    float k2, float k4, float k5,
+    float thresholdOn, float thresholdOff,
+    float dtFrameUs,         // for the drift accumulation
+    double dtFrameSeconds,   // for producing real-world event timestamps
+    double frameStartTime,   // seconds -- previous frame's timestamp
+    int maxEvents,
+    uint8_t *outputBuffer /* [int count][Event...] */)
+	
+	```
+	2) Stochastic : Added Brownian Motion based analytic pdf for polarity estimation and Inverse Gaussian pdf for Timestamp estimation of events
+	```
+	void GenerateEventsKernelDVSStochastic(
+    PixelStateGPU *states, curandState *rngStates,
+    const uint16_t *image, int width, int height, int stride,
+    float k1, float k2, float k3, float k4, float k5, float k6,
+    float thresholdOn, float thresholdOff,
+    float dtFrameUs, double dtFrameSeconds, double frameStartTime,
+    int maxEvents, uint8_t *outputBuffer)
+	```
+- Next added  sensorType, fastDeterministicMode, contrastThresholdOn/Off parameters used by cuda kernels
+	- sensorType : Model parameters for event cameras
+	- fastDeterministicMode : for enabling and disabling stochastic mode
+	- contrastThresholdOn/Off : threshold values for polarity and time stamp estimation
+
 	
 ## Build steps
 - Copy  all files to  nvsipl_camera source application
