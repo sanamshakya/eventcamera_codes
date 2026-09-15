@@ -168,9 +168,14 @@ EventProcessingThreadFunc()
 ## DVS sensor model parameters 
 Deterministic mode is enabled, after setting `bool fastDeterministicMode = true;` in `Config.h`. 
 In current sensor model, event output depends upon three parameters :
-drift (change in intensity) = K1 * rate of change in intensity + K4 + K5 * (average intensity)
+```
+drift  = K1 * rate of change in intensity + K4 + K5 * (average intensity)
 Here K4 : constant drift (dark current) term,
 and K5 : illumination-dependent drift term
+
+modeled actual change in intensity = previous_residual_value + drift * delta_time
+
+```
 So even if rate of change in intensity = 0, there will be drift in intesity due to    K4 + K5 * (average intensity) term. 
 So setting K4 and K5 to zero will remove the event accumulation due to these parameter and decrease noise when there is no any intesity change or motion in camera frame.
 
