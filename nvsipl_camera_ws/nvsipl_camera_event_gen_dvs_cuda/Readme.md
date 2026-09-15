@@ -179,7 +179,7 @@ modeled actual change in intensity = previous_residual_value + drift * delta_tim
 So even if rate of change in intensity = 0, there will be drift in intesity due to    K4 + K5 * (average intensity) term. 
 So setting K4 and K5 to zero will remove the event accumulation due to these parameter and decrease noise when there is no any intesity change or motion in camera frame.
 
-These parameters are stored in `dvs_types.h` file and corresponding to `Raw2DVS346` in `Config.h`
+These parameters are stored in `dvs_types.h` file. Corresponding to `sensorType` as `Raw2DVS346` in `Config.h` corresponding camera model parameters in `dvs_types.h`.
 ```
 if (camera_type == "Raw2DVS346")
         return SensorK{2.388, 4.166e-7, 1.541e-6, 9.768e-8, 1.466e-11, 9.824e-6};
