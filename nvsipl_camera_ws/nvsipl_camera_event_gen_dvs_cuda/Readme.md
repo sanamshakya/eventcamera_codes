@@ -165,6 +165,24 @@ EventProcessingThreadFunc()
 	- fastDeterministicMode : for enabling and disabling stochastic mode
 	- contrastThresholdOn/Off : threshold values for polarity and time stamp estimation
 
+## DVS sensor model parameters 
+Deterministic mode is enabled, after setting `bool fastDeterministicMode = true;` in `Config.h`. 
+In current sensor model, event output depends upon three parameters :
+drift (change in intensity) = K1 * rate of change in intensity + K4 + K5 * (average intensity)
+Here K4 : constant drift (dark current) term,
+and K5 : illumination-dependent drift term
+So even if rate of change in intensity = 0, there will be drift in intesity due to    K4 + K5 * (average intensity) term. 
+So setting K4 and K5 to zero will remove the event accumulation due to these parameter and decrease noise when there is no any intesity change or motion in camera frame.
+
+These parameters are stored in `dvs_types.h` file and corresponding to `Raw2DVS346` in `Config.h`
+```
+if (camera_type == "Raw2DVS346")
+        return SensorK{2.388, 4.166e-7, 1.541e-6, 9.768e-8, 1.466e-11, 9.824e-6};
+//So in current config setting k4 and k5 terms to zero for removing DVS sensor's dark current / illumination-dependent leakage above line becomes :
+		return SensorK{2.388, 4.166e-7, 1.541e-6, 0.0, 0.0, 9.824e-6};		
+```
+
+
 	
 ## Build steps
 - Copy  all files to  nvsipl_camera source application
