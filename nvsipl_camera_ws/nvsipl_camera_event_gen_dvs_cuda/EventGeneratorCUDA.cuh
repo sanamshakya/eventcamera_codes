@@ -2,17 +2,37 @@
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <cstdint>
+
+// IMPORTANT: use the project's REAL headers here, not local stand-ins.
+// Config.h must now define (see the evsim_integration Config.h delivered
+// earlier in this project):
+//   - std::string sensorType         (selects dvs::sensor_k_preset)
+//   - bool        fastDeterministicMode
+//   - double      contrastThresholdOn / contrastThresholdOff
+// positiveThreshold/negativeThreshold (the old linear-model fields) are no
+// longer read by this class -- they were the previous model's thresholds,
+// not this one's.
 #include "Config.h"
 #include "Event.h"
 #include "EventPacket.h"
 #include "IEventGenerator.h"
 
+// dvs_core: only dvs_types.hpp is needed here (SensorK + sensor_k_preset are
+// header-only, host-side helpers) -- no link dependency on event_sim.cpp/.o.
+// Make sure dvs_core's include/ dir is on this target's include path (both
+// the nvcc compile of the .cu and any .cpp that includes this .cuh).
 #include "dvs_types.hpp"
 
 namespace evsim
 {
 
-
+// DVS-Voltmeter per-pixel state. Replaces the old {referenceIntensity,
+// referenceTime} pair: this model compares against the PREVIOUS FRAME's raw
+// intensity (updated unconditionally every call, not just on a crossing) and
+// carries a residual sub-threshold voltage across frames -- see
+// dvs::EventSim::generate_events() (event_sim.cpp) for the CPU/OpenMP
+// reference this mirrors. Frame timing (previousTimestamp_) is tracked
+// host-side instead of per-pixel -- see the note in the .cu.
 struct PixelStateGPU
 {
     float baseIntensity; // previous frame's raw pixel value (dvs_core: base_frame_)
@@ -24,7 +44,7 @@ class EventGeneratorCUDA : public IEventGenerator
 public:
     // maxEventsPerFrame: hard cap on events/frame. Sized this way (not
     // grown dynamically) is what keeps the D2H copy a fixed size every
-    
+    // frame -- see generate(). Tune to your scene's worst-case motion.
     explicit EventGeneratorCUDA(const Config &config, int maxEventsPerFrame = 200000);
     ~EventGeneratorCUDA() override;
 
@@ -64,7 +84,10 @@ private:
     uint64_t frameNumber_ = 0;
     uint64_t rngSeed_ = 0xC0FFEEu; // only used in stochastic mode
 
-    
+    // Frame timing tracked host-side (this replaces the old per-pixel
+    // referenceTime + the h_pixel0_ device->host snapshot copy entirely --
+    // the previous frame's timestamp is already known to the host, no need
+    // to round-trip it through the GPU). See generate() in the .cu.
     double previousTimestamp_ = 0.0;
 
     cudaStream_t stream_ = nullptr;

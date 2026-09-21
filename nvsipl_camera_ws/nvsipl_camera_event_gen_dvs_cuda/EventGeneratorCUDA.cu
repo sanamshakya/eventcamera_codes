@@ -225,6 +225,17 @@ __device__ inline double sample_IG(double ep, double c, double sigma, curandStat
 
 } // namespace stochastic_device
 
+// Hard cap on threshold crossings simulated per pixel per frame. This is a
+// SAFETY VALVE, not a tuning knob -- under any sanely-configured
+// threshold/sigma combination, a pixel crossing more than a handful of
+// times in one frame would already indicate misconfigured parameters (see
+// the earlier note on near-zero thresholds / unscaled leak terms). Its real
+// job is bounding worst-case kernel runtime so a NaN or a degenerate
+// parameter combination can never produce a genuinely unbounded loop, which
+// is what was causing the GPU watchdog to kill the kernel (surfacing later
+// as a deferred error on the next cudaMemcpyAsync/cudaStreamSynchronize).
+constexpr int kMaxCrossingsPerPixel = 16;
+
 __global__ void GenerateEventsKernelDVSStochastic(
     PixelStateGPU *states, curandState *rngStates,
     const uint16_t *image, int width, int height, int stride,
@@ -269,7 +280,15 @@ __global__ void GenerateEventsKernelDVSStochastic(
     int *eventCount = reinterpret_cast<int *>(outputBuffer);
     Event *events = reinterpret_cast<Event *>(outputBuffer + kHeaderBytes);
 
-    while (true)
+    // Bounded loop, per your suggestion: run at most kMaxCrossingsPerPixel
+    // times, but each iteration still checks the same "does this actually
+    // fit in the remaining frame time" condition as before (the `if
+    // (tEndIdeal >= endT) { ...; break; }` below) -- so in the overwhelming
+    // majority of frames this exits after 0-2 iterations exactly as it did
+    // with `while(true)`; the cap only ever matters in the pathological
+    // cases that used to hang.
+    bool exhaustedCap = true; // becomes false if we hit the normal "doesn't fit" exit
+    for (int iter = 0; iter < kMaxCrossingsPerPixel; ++iter)
     {
         const double epOnReal = epOn - deltaVdLegacy;
         const double epOffReal = epOff + deltaVdLegacy;
@@ -281,12 +300,27 @@ __global__ void GenerateEventsKernelDVSStochastic(
         const double cInput = on ? c : -c;
         const double deltaT = sample_IG(epInput, cInput, sigma, &rng); // IG or Levy
 
+        // Defensive guard: sample_IG should always return a finite,
+        // positive value, but edge-case (ep, c, sigma) combinations
+        // (e.g. sigma underflowing to ~0) can in principle produce NaN
+        // or <=0. Without this check, a NaN here poisons `tEndIdeal` and
+        // `tEndIdeal >= endT` is false for ALL endT (IEEE 754: any
+        // comparison with NaN is false) -- the old code's actual root
+        // cause of an unconditional hang. Treat it as "nothing more
+        // resolvable this frame" and bail out cleanly instead.
+        if (!isfinite(deltaT) || deltaT <= 0.0)
+        {
+            exhaustedCap = false;
+            break;
+        }
+
         const double tEndIdeal = deltaT + startT;
 
         if (tEndIdeal >= endT)
         {
             const double sign = on ? 1.0 : -1.0;
             deltaVdLegacy += sign * epInput * (endT - startT) / deltaT;
+            exhaustedCap = false;
             break;
         }
 
@@ -305,6 +339,16 @@ __global__ void GenerateEventsKernelDVSStochastic(
         startT = tEndIdeal;
         deltaVdLegacy = 0.0;
     }
+
+    // If we fell out of the loop by exhausting the cap (rather than the
+    // normal "doesn't fit"/defensive-guard exits above), this pixel is
+    // producing more crossings per frame than any sane configuration
+    // should -- deltaVdLegacy is left at 0 (from the last successful
+    // reset), which just means it starts the next frame fresh rather than
+    // carrying a precise fractional residual. Cheap to detect if you want
+    // visibility into it: atomicAdd a diagnostic counter here and check it
+    // host-side; omitted to keep the hot path lean.
+    (void)exhaustedCap;
 
     state.baseIntensity = static_cast<float>(newVal);
     state.deltaVdRes = static_cast<float>(deltaVdLegacy);
