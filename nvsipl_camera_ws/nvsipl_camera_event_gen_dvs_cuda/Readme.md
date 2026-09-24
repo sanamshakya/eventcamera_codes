@@ -186,7 +186,16 @@ if (camera_type == "Raw2DVS346")
 //So in current config setting k4 and k5 terms to zero for removing DVS sensor's dark current / illumination-dependent leakage above line becomes :
 		return SensorK{2.388, 4.166e-7, 1.541e-6, 0.0, 0.0, 9.824e-6};		
 ```
-
+## Running Stochastic or Deterministic Cuda Kernel
+To run the deterministic kernel, set the following in `Config.h`
+```
+bool fastDeterministicMode = true; //for enabling and disabling stochastic mode
+```
+Next for running stochastic event generation Cuda kernel, set 
+```
+bool fastDeterministicMode = false; //for enabling and disabling stochastic mode
+```
+After setting the `fastDeterministicMode`, rebuild the `EventGenratorCUDA.cu` cuda kernel code.
 
 	
 ## Build steps
