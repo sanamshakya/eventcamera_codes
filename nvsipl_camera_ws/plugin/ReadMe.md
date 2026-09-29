@@ -66,6 +66,6 @@ else {
 ...                
 ```
 
-Then build the main.cpp and run the application.
+Then build the main.cpp and run the application with one of the ISP enabled by removing `--disableISPXOutput` while running nvsipl_camera application.
 
 
