@@ -163,7 +163,7 @@ nvsipl::SIPLStatus CAutoControlPlugin::ProcessAE(const nvsipl::SiplControlAutoIn
         sensorSett.numSensorContexts = 1;
         m_prevExpVal = nextExpTime[0] * nextExpGain[0];
 
-        LOG_MSG("Sensor exp[0]: applied=%.6f applying=%.6f gain applied=%.2f applying=%.2f\n",
+        printf("Sensor exp[0]: applied=%.6f applying=%.6f gain applied=%.2f applying=%.2f\n",
         parsedEmbData.sensorExpInfo.exposureTime[0], nextExpTime[0],
         parsedEmbData.sensorExpInfo.sensorGain[0], nextExpGain[0]);
     }
