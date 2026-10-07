@@ -64,5 +64,26 @@ Steps for integrating event logger class into nvispl camera app with CUDA based 
     ```
     For above test `capture1.events.csv, capture1.frames.csv and capture2.events.csv, capture2.frames.csv` must be present in same script directory. 
     After running the python script two plots for event rate and per pixel inter event interval file will be generated.
+    
+## Update for saving raw input data
+- `CIntensityCaptureWriter` class is integrated into `CNvSIPLConsumer.hpp` to capture first 50 raw input frames.
+-  Add `CIntensityCaptureWriter.hpp` file into nvsipl camera with CUDA based event generation application
+- In main.cpp, enable the raw input data caputre by adding the followings after the EnableEventsCSVLogging: 
+```
+ upCons->EnableEventGeneration(evConfig,"events.bin");
+ upCons->EnableEventCSVLogging("capture", "capture");
+ upCons->EnableIntensityCSVCapture("intensity", 50);
+ 
+```
+- After building and running the application with changes, raw intensity frames are captured as `intensity_frame_X.csv`.
+- Next analyze and plot histogram of the raw captured intensity file by running :
+```
+//for analysing single frame
+python3 analyze_intensity_csv.py --prefix intensity --frames 1
+
+//for analysing all frames
+python3 analyze_intensity_csv.py --prefix intensity
+```
+
 
     

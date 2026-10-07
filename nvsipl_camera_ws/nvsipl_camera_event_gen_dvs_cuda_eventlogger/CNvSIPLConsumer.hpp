@@ -36,6 +36,7 @@
 #include "EventPacket.h"
 #include "CEventFileWriter.hpp"
 #include "EventLogger.h"
+#include "CIntensityCaptureWriter.hpp"
 #include "CRawCaptureWriter.hpp"
 
 #if !NV_IS_SAFETY
@@ -218,23 +219,21 @@ public:
     }
 
     // --- Per-event / per-frame CSV logging (debug/dataset capture) ---
-    // Writes <path>.events.csv (label,frame,t,x,y,polarity - one row per
-    // event, t = that event's own crossing timestamp) and <path>.frames.csv
-    // (label,frame,t,event_count - one row per frame, including zero-event
-    // frames, t = the frame's capture timestamp). Same format as
-    // EventLogger's existing Jetson Nano usage, so any downstream
-    // compare_events.py-style tooling keeps working unchanged.
-    //
-    // Call before frames start arriving (alongside EnableEventGeneration())
-    // - typically right after it. Writing happens from
-    // EventProcessingThreadFunc only (the same single thread that already
-    // calls generate() and m_pEventFileWriter->WriteEventPacket()), which
-    // is why this is safe despite EventLogger itself not being
-    // thread-safe: there's exactly one writer, and it's never the SIPL
-    // capture-callback thread.
+    
     void EnableEventCSVLogging(const string &sPathPrefix, const string &sLabel = "capture")
     {
         m_pEventLogger.reset(new evsim::EventLogger(sPathPrefix, sLabel));
+    }
+
+    // --- Raw intensity CSV capture (debug/dataset capture) ---
+    // Writes "<sPathPrefix>_frame_<N>.csv" for the first numFrames frames,
+       
+    // Call before frames start arriving (alongside EnableEventGeneration()),
+    // same as EnableEventCSVLogging(). Writes happen from
+    // EventProcessingThreadFunc only, right after generate() returns.
+    void EnableIntensityCSVCapture(const string &sPathPrefix, uint32_t numFrames = 50)
+    {
+        m_intensityWriter.Init(sPathPrefix, numFrames);
     }
 
     // Optional: cap how many un-processed raw frames may queue up before
@@ -396,15 +395,7 @@ public:
                 s_lastTimestamp = timestamp;
 
                 // --- Decouple event generation from the capture callback ---
-                // generate() is no longer called here. raw16 is a plain
-                // std::vector<uint16_t> CPU copy (already extracted from
-                // the NvSciBuf via NvSciBufObjGetPixels in
-                // CaptureRawBayerBuffer), so it's safe to move it onto a
-                // queue with no NvSciBuf/refcounting concerns - it doesn't
-                // alias pBuffer at all. A dedicated worker thread drains
-                // the queue and calls generate() + writes the packet, so
-                // OnFrameAvailable returns to the SIPL pipeline immediately
-                // regardless of how long event generation takes.
+                
                 EnqueueRawFrame(std::move(raw16), eventFrameWidth,
                                  eventFrameHeight, eventFrameStride, timestamp);
             }
@@ -595,23 +586,7 @@ public:
 
 private:
     // --- Raw Bayer capture (no demosaic) - std::vector, no OpenCV ---
-    // Use this INSTEAD of ExtractGrayBuffer when working directly with
-    // ICP (sensor) output in RAW10/12/16 Bayer format. Since each pixel
-    // INDEX always sees the same CFA (color filter array) position across
-    // every frame, per-pixel temporal delta is still valid without
-    // demosaicing.
-    //
-    // ASSUMPTIONS to verify with the Python analysis script:
-    //   - m_outputType is ICP (raw sensor output, pre-ISP) - if you're
-    //     capturing post-ISP RAW, the fence-wait logic below needs the
-    //     same EOF wait as ExtractGrayBuffer's non-ICP branch.
-    //   - bufAttrs.planeColorFormats[0] is in the Bayer RAW range
-    //     (matches CFileWriter's "RAW" branch condition).
-    //   - Container is 16-bit (bpp == 2) even if sensor bit depth is
-    //     10/12-bit - values will be left- or right-justified within the
-    //     16 bits depending on sensor/ISP config, which the Python script
-    //     checks via max-value histogram.
-    //
+    
     // Since NvSciBufObjGetPixels can be told to write at whatever pitch we
     // request, we request pitch == width*2 (tightly packed) and write
     // straight into the destination vector's own storage - no separate
@@ -730,18 +705,7 @@ private:
 
     // --- Generalized single-plane capture: Bayer, Luma, RGBA, packed YUV ---
     //
-    // Covers the SAME format buckets the original consumer's file-extension
-    // logic detects (.raw/.luma/.rgba/ and single-plane .yuv), but returns
-    // raw bytes + metadata instead of writing to disk - use this when you
-    // need the frame for further C++ processing (event generation, CV ops)
-    // rather than just archiving bytes (for pure archiving, CFileWriter
-    // already does this generically - see WriteBufferToFile).
-    //
-    // NOT covered yet: semi-planar YUV (2-3 planes, e.g. NV12) - that needs
-    // separate multi-plane handling (each plane has its own pitch, and
-    // combining them for a later NV12->BGR conversion needs a specific
-    // stacked layout). Returns NVSIPL_STATUS_NOT_SUPPORTED for that case
-    // for now, flagged explicitly rather than guessed at.
+   
     enum class FrameFormatBucket
     {
         BAYER_RAW,      // Bayer mosaic, any bit depth/CFA pattern
@@ -1259,20 +1223,7 @@ private:
             if (m_frameQueue.size() >= m_uMaxQueueDepth)
             {
                 // generate() is falling behind capture. Dropping the
-                // OLDEST queued frame (rather than the incoming one, and
-                // rather than blocking here) keeps the queue bounded and
-                // keeps event output as close to real-time as possible.
-                //
-                // Semantics: EventGenerator diffs each pixel against
-                // whatever reference frame it last processed, so this
-                // does not corrupt the output - it just means the next
-                // processed frame's delta spans a longer time window,
-                // producing a burst of crossings at that frame's
-                // timestamp instead of evenly spaced ones. Fine for
-                // near-real-time monitoring; if you need every capture
-                // frame reflected in the event stream for offline/
-                // dataset-quality output, raise m_uMaxQueueDepth (or fix
-                // the upstream slowness) instead of relying on drops.
+              
                 LOG_ERR("EventGenerator: processing queue full (%zu) - "
                         "dropping oldest pending frame\n",
                         m_frameQueue.size());
@@ -1347,12 +1298,29 @@ private:
                                               packet.endTime,
                                               static_cast<int>(packet.events.size()));
             }
+
+            // --- Raw intensity CSV capture ---
+            // frame.data is still the exact buffer generate() just diffed
+            // (generate() takes a const pointer, never takes ownership of
+            // it), so this is the same intensities the event thresholds
+            // above were computed from. Skip the call entirely once the
+            // numFrames cap is hit rather than paying for the no-op.
+            if (!m_intensityWriter.IsDone())
+            {
+                if (!m_intensityWriter.WriteFrame(packet.frameNumber, frame.data.data(),
+                                                  frame.width, frame.height, frame.stridePixels))
+                {
+                    LOG_ERR("EventGenerator: intensity CSV write failed for frame %llu\n",
+                            (unsigned long long)packet.frameNumber);
+                }
+            }
         }
     }
 
     unique_ptr<CEventFileWriter> m_pEventFileWriter = nullptr;
     string m_sEventFilename = "";
     unique_ptr<evsim::EventLogger> m_pEventLogger = nullptr;
+    CIntensityCaptureWriter m_intensityWriter; // see EnableIntensityCSVCapture()
 
     // Scratch buffer for the bpp==1 (8-bit luma) case in ExtractGrayBuffer,
     // reused across frames to avoid per-frame allocation.
