@@ -203,8 +203,69 @@ After setting the `fastDeterministicMode`, rebuild the `EventGenratorCUDA.cu` cu
 
 ## New CLAHE Related updates
 - In Eventgenerator cuda code:
+	- in generation function, raw input is passed to clahe cuda kernel:
+	```
+	if (useClahe)
+    {
+        clahe_->setFormat(claheBits, claheShift);   // no-op unless changed
+        clahe_->setParams(claheClip, 8, 8);         // cheap: tile grid is fixed
+        clahe_->applyU16(d_imageRaw_, static_cast<size_t>(width_) * sizeof(uint16_t),
+                         d_image_,    static_cast<size_t>(width_) * sizeof(uint16_t),
+                         stream_);
+    }
+	//here d_imageRaw - input RAW data
+	// d_image_ - output buffer for clahe cuda kernel
+	...
+	```
+	- Other functions for enabling and disabling clahe cuda kernel
 
 - In nvsipl consumer code:
+	- Updated event generation initializer  with clahe controls:
+	```
+	  void EnableEventGeneration(const evsim::Config &evConfig,
+                               const string &sEventFilename = "",
+                               bool useCuda = true,
+                               int maxEventsPerFrame = 200000,
+                               bool useClahe = true,
+                               float claheClip = 2.0f,
+                               int claheBits = 12,
+                               int claheInputShift = 0)
+	```
+	- Other updates are integrated into `CNvSIPLConsumer.hpp`, so need to update accordingly.
+
+
+- In Makefile
+	- Addition of claheCuda.o 
+	```
+	ifeq ($(EVSIM_ENABLE_CUDA), 1)
+  		OBJS += EventGeneratorCUDA.o
+  		OBJS += ClaheCuda.o
+	endif
+	```
+	- nvcc compiling command :
+	```
+	ClaheCuda.o: ClaheCuda.cu ClaheCuda.cuh
+	$(NVCC) $(NVCC_FLAGS) -o $@ -c $<
+
+	```
+
+- In main.cpp :
+	- Update the `EnableEventGeneration` with the new variables for controlling Clahe kernel:
+	```
+	upCons->EnableEventGeneration(evConfig,"events.bin");
+	```
+	for custom control of event generation cuda kernel and clahe kernel, set the values as mentioned in `CNvSIPLConsumer.hpp`
+	```
+	void EnableEventGeneration(const evsim::Config &evConfig,
+                               const string &sEventFilename = "",
+                               bool useCuda = true,
+                               int maxEventsPerFrame = 200000,
+                               bool useClahe = true,
+                               float claheClip = 2.0f,
+                               int claheBits = 12,
+                               int claheInputShift = 0)
+	```
+	By default they are enabled here.
 
 
 	
