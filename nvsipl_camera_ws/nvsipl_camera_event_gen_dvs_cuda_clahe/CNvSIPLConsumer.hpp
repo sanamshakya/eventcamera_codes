@@ -159,22 +159,27 @@ public:
     }
 
     // --- Event generation setup (step 1 & 4) ---
-    // sEventFilename: pass "" to skip binary event-file output (e.g. once
-    // you move to the queue-based downstream consumer in the next step).
-    // useCuda: build the GPU (EventGeneratorCUDA) backend instead of the
-    // CPU row-threaded one. Requires the binary to be built with
-    // EVSIM_ENABLE_CUDA defined (and linked/compiled with nvcc) - see the
-    // #ifdef around the EventGeneratorCUDA.cuh include above. Both
-    // backends implement IEventGenerator, so everything downstream
-    // (m_pEventGenerator->initialize()/generate(), the event-processing
-    // thread, the file writer) is unaffected by which one you pick.
-    // maxEventsPerFrame only matters for the CUDA backend - see the note
-    // on EventGeneratorCUDA's constructor about sizing it for your scene's
-    // worst-case motion.
+    //
+    // CLAHE (CUDA backend only; CPU backend ignores it with a warning):
+    // useClahe       : enable on-GPU CLAHE in front of the event kernels.
+    // claheClip      : clip limit (OpenCV-style, 2.0 is a sane default).
+    // claheBits      : 12 for NVSIPL RAW12 in a 16-bit container (4096-bin
+    //                  histograms, output stays on the 0..4095 scale so the
+    //                  contrast thresholds mean the same with CLAHE on/off),
+    //                  or 8 for 8-bit-range data.
+    // claheInputShift: 0 if the 12-bit value is right-justified (max ~4095),
+    //                  4 if it is left-justified in the 16 bits (max ~65520).
+    //                  Check the "RawCapture: raw16 ... pixel range" log:
+    //                  max near 4095 -> 0, max near 65520 -> 4.
+    // Toggle/retune later with SetClahe() - no restart needed.
     void EnableEventGeneration(const evsim::Config &evConfig,
                                const string &sEventFilename = "",
-                               bool useCuda = false,
-                               int maxEventsPerFrame = 200000)
+                               bool useCuda = true,
+                               int maxEventsPerFrame = 200000,
+                               bool useClahe = true,
+                               float claheClip = 2.0f,
+                               int claheBits = 12,
+                               int claheInputShift = 0)
     {
 #ifdef EVSIM_ENABLE_CUDA
         if (useCuda)
@@ -197,11 +202,54 @@ public:
         m_sEventFilename = sEventFilename;
         m_bEventGenEnabled = true;
 
+        // CLAHE setup. Configured BEFORE the worker thread starts below, and
+        // before the generator's first initialize()/generate(), so there is
+        // no extra state reset at startup.
+        m_iClaheBits = claheBits;
+        m_iClaheShift = claheInputShift;
+        m_pEventGenerator->setClaheFormat(claheBits, claheInputShift);
+        m_pEventGenerator->setClaheClip(claheClip);
+        m_pEventGenerator->setClaheEnabled(useClahe);
+        if (useClahe)
+        {
+            if (m_pEventGenerator->supportsClahe())
+            {
+                LOG_ERR("EventGenerator: CLAHE enabled (clip=%.2f, %d-bit, input shift=%d)\n",
+                        claheClip, claheBits, claheInputShift);
+            }
+            else
+            {
+                LOG_ERR("EventGenerator: CLAHE requested but the active backend does not "
+                        "support it (needs useCuda=true and EVSIM_ENABLE_CUDA) - ignored\n");
+            }
+        }
+
         // Start the dedicated worker that drains m_frameQueue and runs
         // generate() off the SIPL capture-callback thread. Started once
         // here, joined in Deinit().
         m_bStopEventProcessing = false;
         m_eventProcessingThread = std::thread(&CNvSIPLConsumer::EventProcessingThreadFunc, this);
+    }
+
+    // Runtime CLAHE control (CUDA backend). Safe to call from any thread at
+    // any time after EnableEventGeneration(); the generator picks it up on
+    // its next frame and restarts its per-pixel state so the brightness
+    // jump does not produce a burst of events (that one frame yields an
+    // empty packet).
+    void SetClahe(bool enable, float clip = 2.0f)
+    {
+        if (m_pEventGenerator == nullptr)
+        {
+            LOG_ERR("SetClahe: call EnableEventGeneration() first\n");
+            return;
+        }
+        if (!m_pEventGenerator->supportsClahe())
+        {
+            LOG_ERR("SetClahe: active backend does not support CLAHE - ignored\n");
+            return;
+        }
+        m_pEventGenerator->setClaheClip(clip);
+        m_pEventGenerator->setClaheEnabled(enable);
     }
 
     // Optional: cap how many un-processed raw frames may queue up before
@@ -304,6 +352,26 @@ public:
                 LOG_INFO("RawCapture: raw16 %dx%d, pixel range [%u, %u]\n",
                          rawWidth, rawHeight, (unsigned)minVal, (unsigned)maxVal);
 
+                // One-time sanity check for CLAHE's bit-depth assumption: the
+                // histogram clamps anything above (2^bits - 1) after the
+                // shift, so a left-justified frame with shift=0 would
+                // collapse into the top bin and look flat.
+                if (!m_bClaheRangeChecked && m_bEventGenEnabled)
+                {
+                    m_bClaheRangeChecked = true;
+                    const unsigned maxBinned =
+                        (unsigned)(maxVal >> m_iClaheShift);
+                    const unsigned limit = (1u << m_iClaheBits) - 1u;
+                    if (maxBinned > limit)
+                    {
+                        LOG_ERR("CLAHE: frame max %u (>> %d = %u) exceeds the %d-bit range "
+                                "(%u). Data looks left-justified: use claheInputShift=%d "
+                                "(or claheBits=8 with a larger shift)\n",
+                                (unsigned)maxVal, m_iClaheShift, maxBinned,
+                                m_iClaheBits, limit, (int)(16 - m_iClaheBits));
+                    }
+                }
+
                 if (m_pRawCaptureWriter == nullptr)
                 {
                     m_pRawCaptureWriter.reset(new CRawCaptureWriter);
@@ -363,15 +431,7 @@ public:
                 s_lastTimestamp = timestamp;
 
                 // --- Decouple event generation from the capture callback ---
-                // generate() is no longer called here. raw16 is a plain
-                // std::vector<uint16_t> CPU copy (already extracted from
-                // the NvSciBuf via NvSciBufObjGetPixels in
-                // CaptureRawBayerBuffer), so it's safe to move it onto a
-                // queue with no NvSciBuf/refcounting concerns - it doesn't
-                // alias pBuffer at all. A dedicated worker thread drains
-                // the queue and calls generate() + writes the packet, so
-                // OnFrameAvailable returns to the SIPL pipeline immediately
-                // regardless of how long event generation takes.
+                
                 EnqueueRawFrame(std::move(raw16), eventFrameWidth,
                                  eventFrameHeight, eventFrameStride, timestamp);
             }
@@ -562,28 +622,7 @@ public:
 
 private:
     // --- Raw Bayer capture (no demosaic) - std::vector, no OpenCV ---
-    // Use this INSTEAD of ExtractGrayBuffer when working directly with
-    // ICP (sensor) output in RAW10/12/16 Bayer format. Since each pixel
-    // INDEX always sees the same CFA (color filter array) position across
-    // every frame, per-pixel temporal delta is still valid without
-    // demosaicing.
-    //
-    // ASSUMPTIONS to verify with the Python analysis script:
-    //   - m_outputType is ICP (raw sensor output, pre-ISP) - if you're
-    //     capturing post-ISP RAW, the fence-wait logic below needs the
-    //     same EOF wait as ExtractGrayBuffer's non-ICP branch.
-    //   - bufAttrs.planeColorFormats[0] is in the Bayer RAW range
-    //     (matches CFileWriter's "RAW" branch condition).
-    //   - Container is 16-bit (bpp == 2) even if sensor bit depth is
-    //     10/12-bit - values will be left- or right-justified within the
-    //     16 bits depending on sensor/ISP config, which the Python script
-    //     checks via max-value histogram.
-    //
-    // Since NvSciBufObjGetPixels can be told to write at whatever pitch we
-    // request, we request pitch == width*2 (tightly packed) and write
-    // straight into the destination vector's own storage - no separate
-    // scratch buffer or copy needed, since the buffer is already native
-    // 16-bit (no widening from 8-bit required, unlike ExtractGrayBuffer).
+    
     SIPLStatus CaptureRawBayerBuffer(INvSIPLClient::INvSIPLNvMBuffer *pNvMBuffer,
                                      NvSciSyncCpuWaitContext cpuWaitContext,
                                      std::vector<uint16_t> &outRaw16,
@@ -695,20 +734,7 @@ private:
         return NVSIPL_STATUS_OK;
     }
 
-    // --- Generalized single-plane capture: Bayer, Luma, RGBA, packed YUV ---
-    //
-    // Covers the SAME format buckets the original consumer's file-extension
-    // logic detects (.raw/.luma/.rgba/ and single-plane .yuv), but returns
-    // raw bytes + metadata instead of writing to disk - use this when you
-    // need the frame for further C++ processing (event generation, CV ops)
-    // rather than just archiving bytes (for pure archiving, CFileWriter
-    // already does this generically - see WriteBufferToFile).
-    //
-    // NOT covered yet: semi-planar YUV (2-3 planes, e.g. NV12) - that needs
-    // separate multi-plane handling (each plane has its own pitch, and
-    // combining them for a later NV12->BGR conversion needs a specific
-    // stacked layout). Returns NVSIPL_STATUS_NOT_SUPPORTED for that case
-    // for now, flagged explicitly rather than guessed at.
+    
     enum class FrameFormatBucket
     {
         BAYER_RAW,      // Bayer mosaic, any bit depth/CFA pattern
@@ -762,11 +788,7 @@ private:
     }
 
     // Generic single-plane extractor: works for BAYER_RAW, LUMA, RGBA,
-    // YUV_PACKED. Returns raw bytes + the metadata needed to interpret
-    // them (bytesPerPixel, width, height) - no OpenCV, caller reinterprets
-    // as needed (e.g. cast outBytes.data() to uint16_t* for bpp==2).
-    // Caller checks ClassifyFormat() first; this function trusts outBucket
-    // and does not re-validate the format range.
+    
     SIPLStatus CaptureFrameGeneric(INvSIPLClient::INvSIPLNvMBuffer *pNvMBuffer,
                                    NvSciSyncCpuWaitContext cpuWaitContext,
                                    std::vector<uint8_t> &outBytes,
@@ -1194,6 +1216,12 @@ private:
     bool m_bEventGenEnabled = false;
     bool m_bEventGenInitialized = false;
 
+    // CLAHE format (mirrors what was passed to EnableEventGeneration(); used
+    // only for the one-time range sanity check in OnFrameAvailable).
+    int  m_iClaheBits = 12;
+    int  m_iClaheShift = 0;
+    bool m_bClaheRangeChecked = false;
+
     // --- Async event-generation queue/worker ---
     // Holds one already-extracted CPU frame. No NvSciBuf/pBuffer reference
     // in here at all, so there's nothing to AddRef/Release - the data is
@@ -1229,17 +1257,7 @@ private:
                 // OLDEST queued frame (rather than the incoming one, and
                 // rather than blocking here) keeps the queue bounded and
                 // keeps event output as close to real-time as possible.
-                //
-                // Semantics: EventGenerator diffs each pixel against
-                // whatever reference frame it last processed, so this
-                // does not corrupt the output - it just means the next
-                // processed frame's delta spans a longer time window,
-                // producing a burst of crossings at that frame's
-                // timestamp instead of evenly spaced ones. Fine for
-                // near-real-time monitoring; if you need every capture
-                // frame reflected in the event stream for offline/
-                // dataset-quality output, raise m_uMaxQueueDepth (or fix
-                // the upstream slowness) instead of relying on drops.
+                
                 LOG_ERR("EventGenerator: processing queue full (%zu) - "
                         "dropping oldest pending frame\n",
                         m_frameQueue.size());
