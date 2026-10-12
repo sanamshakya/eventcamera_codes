@@ -2,16 +2,11 @@
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <cstdint>
+#include <atomic>
+#include <memory>
 
-// IMPORTANT: use the project's REAL headers here, not local stand-ins.
-// Config.h must now define (see the evsim_integration Config.h delivered
-// earlier in this project):
-//   - std::string sensorType         (selects dvs::sensor_k_preset)
-//   - bool        fastDeterministicMode
-//   - double      contrastThresholdOn / contrastThresholdOff
-// positiveThreshold/negativeThreshold (the old linear-model fields) are no
-// longer read by this class -- they were the previous model's thresholds,
-// not this one's.
+
+#include "ClaheCuda.cuh"
 #include "Config.h"
 #include "Event.h"
 #include "EventPacket.h"
@@ -29,10 +24,7 @@ namespace evsim
 // DVS-Voltmeter per-pixel state. Replaces the old {referenceIntensity,
 // referenceTime} pair: this model compares against the PREVIOUS FRAME's raw
 // intensity (updated unconditionally every call, not just on a crossing) and
-// carries a residual sub-threshold voltage across frames -- see
-// dvs::EventSim::generate_events() (event_sim.cpp) for the CPU/OpenMP
-// reference this mirrors. Frame timing (previousTimestamp_) is tracked
-// host-side instead of per-pixel -- see the note in the .cu.
+// carries a residual sub-threshold voltage across frames
 struct PixelStateGPU
 {
     float baseIntensity; // previous frame's raw pixel value (dvs_core: base_frame_)
@@ -71,6 +63,30 @@ public:
         int stridePixels,
         double timestamp) override;
 
+    //------------------------------------------------------------------
+    // Optional on-GPU CLAHE pre-processing (off by default).
+    //
+  
+    //------------------------------------------------------------------
+    bool  supportsClahe() const override { return true; }
+    void  setClaheEnabled(bool on) override;
+    bool  claheEnabled() const { return claheEnabled_.load(); }
+    void  setClaheClip(float clipLimit) override;
+    float claheClip() const { return claheClip_.load(); }
+    // bits: 8 or 12.  inputShift: 0 for right-justified, 4 for 12-bit data
+    // left-justified in 16 bits.
+    void  setClaheFormat(int bits, int inputShift) override;
+
+    // If true, generate() also copies the frame the event kernels saw
+    // (post-CLAHE) back to the host. Costs one extra W*H*2-byte D2H per frame,
+    // so enable it only when you want to display/inspect that frame.
+    void setCaptureInputFrame(bool on) { captureInput_ = on; }
+
+    // Pinned host buffer, width x height, uint16 (values 0..255), tightly
+    // packed. Valid until the next generate(); nullptr unless
+    // setCaptureInputFrame(true) and a frame has been generated.
+    const uint16_t *lastInputFrame() const { return inputValid_ ? h_inputCopy_ : nullptr; }
+
 private:
     void allocateDeviceBuffers();
     void freeDeviceBuffers();
@@ -95,13 +111,10 @@ private:
     // Device buffers (persistent across frames -- allocated once in
     // initialize(), never per-frame. Per-frame cudaMalloc/cudaFree is a
     // major, avoidable source of latency variance.)
-    uint16_t       *d_image_       = nullptr; // width_*height_, tightly packed
+    uint16_t       *d_image_       = nullptr; // width_*height_, tightly packed (what the event kernels read)
     PixelStateGPU  *d_pixelStates_ = nullptr; // width_*height_
     uint8_t        *d_outputBuffer_ = nullptr; // [int eventCount][Event x maxEvents_]
 
-    // Only allocated when !config_.fastDeterministicMode -- the deterministic
-    // path never touches an RNG, so there's no reason to pay for this buffer
-    // (width_*height_*sizeof(curandState), which is not small) when running fast.
     curandState *d_rngStates_ = nullptr;
 
     // Pinned host mirrors -- required for predictable-latency DMA.
@@ -109,6 +122,19 @@ private:
     uint8_t  *h_outputBuffer_ = nullptr;
 
     size_t outputBufferBytes_ = 0;
+
+    // ---- CLAHE ----
+    std::unique_ptr<ClaheCuda> clahe_;
+    uint16_t *d_imageRaw_   = nullptr; // un-enhanced upload target when CLAHE is on
+    uint16_t *h_inputCopy_  = nullptr; // pinned; optional copy of d_image_ for display
+    // Written by any thread (setters), read by generate().
+    std::atomic<bool>  claheEnabled_{false};
+    std::atomic<float> claheClip_{2.0f};
+    std::atomic<int>   claheBits_{12};   // default: NVSIPL RAW12 in 16-bit container
+    std::atomic<int>   claheShift_{0};   // 0 = right-justified
+    std::atomic<bool>  resetRequested_{false};
+    bool  captureInput_   = false;
+    bool  inputValid_     = false;
 };
 
 } // namespace evsim

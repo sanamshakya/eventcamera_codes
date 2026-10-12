@@ -3,27 +3,7 @@
 // ClaheCuda - CUDA implementation of CLAHE (contrast limited adaptive
 // histogram equalization) for single-channel images whose values live in
 // the range 0 .. (2^bits - 1).
-//
-// Two bit depths, selected at construction (or via setFormat()):
-//   bits = 8  : 256-bin histograms,  output 0..255   (8-bit video sources)
-//   bits = 12 : 4096-bin histograms, output 0..4095  (12-bit sensor data
-//               carried in a 16-bit container, e.g. NVSIPL RAW12 -> uint16)
-//
-// Algorithm mirrors cv::createCLAHE (bit-exact for bits=8 when
-// width % tilesX == 0 and height % tilesY == 0):
-//   1. per-tile histogram
-//   2. clip at max(int(clipLimit * tileArea / bins), 1), redistribute excess
-//   3. per-tile CDF -> LUT (scaled to bins-1)
-//   4. per-pixel bilinear interpolation between the 4 nearest tile LUTs
-//
-// inputShift: right-shift applied to every input pixel BEFORE binning.
-//   0 for right-justified data. 4 for 12-bit data left-justified in 16 bits
-//   (values up to ~65520). Pixels still above the range are clamped to the
-//   top bin. The OUTPUT is always on the 0..(2^bits - 1) scale (i.e. already
-//   shifted), which is also the scale the event kernels should see.
-//
-// All image buffers are device memory; calls are asynchronous on the given
-// stream, so they chain directly in front of the event-generator kernels.
+
 //
 #include <cuda_runtime.h>
 #include <cstddef>

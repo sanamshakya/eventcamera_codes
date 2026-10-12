@@ -96,6 +96,7 @@ OBJS   += main.o
 OBJS   += EventGenerator.o
 ifeq ($(EVSIM_ENABLE_CUDA), 1)
   OBJS += EventGeneratorCUDA.o
+  OBJS += ClaheCuda.o
 endif
 ifeq ($(NV_PLATFORM_SAFETY), 0)
   OBJS   += CComposite.o
@@ -152,15 +153,22 @@ $(TARGETS): $(OBJS)
 # nvcc doesn't try to interpret DRIVE-OS/NVSIPL flags itself - only nvcc's
 # own flags (gencode, --std) are passed directly.
 ifeq ($(EVSIM_ENABLE_CUDA), 1)
-EventGeneratorCUDA.o: EventGeneratorCUDA.cu
-	$(NVCC) $(CUDA_GENCODE_FLAGS) --std=c++14 \
+NVCC_FLAGS = $(CUDA_GENCODE_FLAGS) --std=c++14 \
 	    $(addprefix -Xcompiler ,$(CXXFLAGS)) \
 	    $(addprefix -Xcompiler ,$(CPPFLAGS)) \
-	    -I$(CUDA_PATH)/include -o $@ -c $<
+	    -I$(CUDA_PATH)/include
+
+# EventGeneratorCUDA.cuh includes ClaheCuda.cuh and IEventGenerator.h, so
+# list them as prerequisites to get a rebuild when either header changes.
+EventGeneratorCUDA.o: EventGeneratorCUDA.cu EventGeneratorCUDA.cuh ClaheCuda.cuh IEventGenerator.h
+	$(NVCC) $(NVCC_FLAGS) -o $@ -c $<
+
+ClaheCuda.o: ClaheCuda.cu ClaheCuda.cuh
+	$(NVCC) $(NVCC_FLAGS) -o $@ -c $<
 endif
 
 nvmTest_utils_lib:
 	$(MAKE) -C ../utils/lib
 
 clean clobber:
-	rm -rf $(OBJS) $(TARGETS) EventGeneratorCUDA.o
+	rm -rf $(OBJS) $(TARGETS) EventGeneratorCUDA.o ClaheCuda.o

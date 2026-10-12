@@ -225,15 +225,7 @@ __device__ inline double sample_IG(double ep, double c, double sigma, curandStat
 
 } // namespace stochastic_device
 
-// Hard cap on threshold crossings simulated per pixel per frame. This is a
-// SAFETY VALVE, not a tuning knob -- under any sanely-configured
-// threshold/sigma combination, a pixel crossing more than a handful of
-// times in one frame would already indicate misconfigured parameters (see
-// the earlier note on near-zero thresholds / unscaled leak terms). Its real
-// job is bounding worst-case kernel runtime so a NaN or a degenerate
-// parameter combination can never produce a genuinely unbounded loop, which
-// is what was causing the GPU watchdog to kill the kernel (surfacing later
-// as a deferred error on the next cudaMemcpyAsync/cudaStreamSynchronize).
+
 constexpr int kMaxCrossingsPerPixel = 16;
 
 __global__ void GenerateEventsKernelDVSStochastic(
@@ -270,23 +262,14 @@ __global__ void GenerateEventsKernelDVSStochastic(
     const double epOff = thresholdOff;
     double deltaVdLegacy = state.deltaVdRes;
 
-    // Time within this frame is tracked in [0, dtFrameUs] here (relative),
-    // rather than absolute microsecond timestamps as on the CPU side --
-    // simpler on-device, and frac = tEndIdeal/dtFrameUs is all that's
-    // needed to place the event's real-world timestamp below.
+   
     double startT = 0.0;
     const double endT = static_cast<double>(dtFrameUs);
 
     int *eventCount = reinterpret_cast<int *>(outputBuffer);
     Event *events = reinterpret_cast<Event *>(outputBuffer + kHeaderBytes);
 
-    // Bounded loop, per your suggestion: run at most kMaxCrossingsPerPixel
-    // times, but each iteration still checks the same "does this actually
-    // fit in the remaining frame time" condition as before (the `if
-    // (tEndIdeal >= endT) { ...; break; }` below) -- so in the overwhelming
-    // majority of frames this exits after 0-2 iterations exactly as it did
-    // with `while(true)`; the cap only ever matters in the pathological
-    // cases that used to hang.
+  
     bool exhaustedCap = true; // becomes false if we hit the normal "doesn't fit" exit
     for (int iter = 0; iter < kMaxCrossingsPerPixel; ++iter)
     {
@@ -300,14 +283,7 @@ __global__ void GenerateEventsKernelDVSStochastic(
         const double cInput = on ? c : -c;
         const double deltaT = sample_IG(epInput, cInput, sigma, &rng); // IG or Levy
 
-        // Defensive guard: sample_IG should always return a finite,
-        // positive value, but edge-case (ep, c, sigma) combinations
-        // (e.g. sigma underflowing to ~0) can in principle produce NaN
-        // or <=0. Without this check, a NaN here poisons `tEndIdeal` and
-        // `tEndIdeal >= endT` is false for ALL endT (IEEE 754: any
-        // comparison with NaN is false) -- the old code's actual root
-        // cause of an unconditional hang. Treat it as "nothing more
-        // resolvable this frame" and bail out cleanly instead.
+      
         if (!isfinite(deltaT) || deltaT <= 0.0)
         {
             exhaustedCap = false;
@@ -324,10 +300,7 @@ __global__ void GenerateEventsKernelDVSStochastic(
             break;
         }
 
-        // Note: unlike the deterministic kernel's single atomicAdd(crossings),
-        // this claims one slot per emitted event -- per-pixel event counts are
-        // typically 0-3, so the extra atomic contention is minor.
-        const int slot = atomicAdd(eventCount, 1);
+             const int slot = atomicAdd(eventCount, 1);
         if (slot < maxEvents)
         {
             const double frac = tEndIdeal / endT; // 0..1 fraction of the frame elapsed
@@ -340,14 +313,7 @@ __global__ void GenerateEventsKernelDVSStochastic(
         deltaVdLegacy = 0.0;
     }
 
-    // If we fell out of the loop by exhausting the cap (rather than the
-    // normal "doesn't fit"/defensive-guard exits above), this pixel is
-    // producing more crossings per frame than any sane configuration
-    // should -- deltaVdLegacy is left at 0 (from the last successful
-    // reset), which just means it starts the next frame fresh rather than
-    // carrying a precise fractional residual. Cheap to detect if you want
-    // visibility into it: atomicAdd a diagnostic counter here and check it
-    // host-side; omitted to keep the hot path lean.
+
     (void)exhaustedCap;
 
     state.baseIntensity = static_cast<float>(newVal);
@@ -374,15 +340,22 @@ EventGeneratorCUDA::~EventGeneratorCUDA()
 
 void EventGeneratorCUDA::freeDeviceBuffers()
 {
+    // The CLAHE object owns its own LUT buffer; release it before the stream
+    // goes away (the destructor above frees buffers first, then the stream).
+    clahe_.reset();
+
     if (d_image_)        cudaFree(d_image_);
+    if (d_imageRaw_)     cudaFree(d_imageRaw_);
     if (d_pixelStates_)  cudaFree(d_pixelStates_);
     if (d_outputBuffer_) cudaFree(d_outputBuffer_);
     if (d_rngStates_)    cudaFree(d_rngStates_);
     if (h_image_)        cudaFreeHost(h_image_);
+    if (h_inputCopy_)    cudaFreeHost(h_inputCopy_);
     if (h_outputBuffer_) cudaFreeHost(h_outputBuffer_);
-    d_image_ = nullptr; d_pixelStates_ = nullptr; d_outputBuffer_ = nullptr;
-    d_rngStates_ = nullptr;
-    h_image_ = nullptr; h_outputBuffer_ = nullptr;
+    d_image_ = nullptr; d_imageRaw_ = nullptr; d_pixelStates_ = nullptr;
+    d_outputBuffer_ = nullptr; d_rngStates_ = nullptr;
+    h_image_ = nullptr; h_inputCopy_ = nullptr; h_outputBuffer_ = nullptr;
+    inputValid_ = false;
 }
 
 void EventGeneratorCUDA::allocateDeviceBuffers()
@@ -407,9 +380,22 @@ void EventGeneratorCUDA::allocateDeviceBuffers()
     // timing.
     CUDA_CHECK(cudaHostAlloc(&h_image_, numPixels * sizeof(uint16_t), cudaHostAllocDefault));
     CUDA_CHECK(cudaHostAlloc(&h_outputBuffer_, outputBufferBytes_, cudaHostAllocDefault));
+
+    // ---- CLAHE ----
+    // d_imageRaw_ : upload target for the un-enhanced frame; CLAHE reads it and
+    //               writes the enhanced frame into d_image_ (what the event
+    //               kernels consume). Unused while CLAHE is off.
+    // h_inputCopy_: optional pinned copy of d_image_ for display
+    //               (see setCaptureInputFrame()).
+    CUDA_CHECK(cudaMalloc(&d_imageRaw_, numPixels * sizeof(uint16_t)));
+    CUDA_CHECK(cudaHostAlloc(&h_inputCopy_, numPixels * sizeof(uint16_t), cudaHostAllocDefault));
+    // 8x8 tile grid; histogram depth / input shift follow the current format
+    // (12-bit: 4096-bin histograms, LUT = 8*8*4096*2 B = 512 KB).
+    clahe_ = std::make_unique<ClaheCuda>(width_, height_, claheClip_.load(), 8, 8,
+                                         claheBits_.load(), claheShift_.load());
 }
 
-// EventGeneratorCUDA helper functions
+// EventGeneratorCuda helper functions
 void EventGeneratorCUDA::initialize(int width, int height)
 {
     freeDeviceBuffers();
@@ -422,6 +408,32 @@ void EventGeneratorCUDA::initialize(int width, int height)
 void EventGeneratorCUDA::reset()
 {
     initialized_ = false;
+}
+
+// CLAHE controls. A change resets the per-pixel state on the next generate(),
+// so the brightness jump between raw and enhanced frames is not turned into a
+// burst of events. These only touch atomics, so they are safe to call from any
+// thread; generate() consumes them at the top of its next call.
+void EventGeneratorCUDA::setClaheEnabled(bool on)
+{
+    if (claheEnabled_.exchange(on) != on)
+        resetRequested_.store(true);
+}
+
+void EventGeneratorCUDA::setClaheClip(float clipLimit)
+{
+    if (claheClip_.exchange(clipLimit) != clipLimit)
+        resetRequested_.store(true);
+}
+
+void EventGeneratorCUDA::setClaheFormat(int bits, int inputShift)
+{
+    bits = (bits <= 8) ? 8 : 12;
+    if (inputShift < 0) inputShift = 0;
+    const int oldBits  = claheBits_.exchange(bits);
+    const int oldShift = claheShift_.exchange(inputShift);
+    if (oldBits != bits || oldShift != inputShift)
+        resetRequested_.store(true);
 }
 
 // EventGeneratorCuda main runner function
@@ -437,30 +449,61 @@ EventPacket EventGeneratorCUDA::generate(
     if (image == nullptr)
         return packet;
 
-    // Mirrors EventGenerator::generate()'s lazy-init behavior: if nobody
-    // called initialize() explicitly yet, do it now from the width/height
-    // passed in here. CNvSIPLConsumer calls initialize() explicitly before
-    // any generate() call, so this is a safety net, not the normal path -
-    // note it does NOT handle a resolution change mid-stream (neither does
-    // the CPU version): call initialize() yourself for that.
+    
     if (width_ == 0 || height_ == 0)
         initialize(width, height);
 
     if (width_ == 0 || height_ == 0)
         return packet;
 
-    // Stage into pinned memory row-by-row (handles stridePixels != width_).
-    // If your upstream downscale step can write directly into a pinned
-    // buffer, pass that pointer as `image` with stridePixels == width_ and
-    // this memcpy collapses to a single cudaMemcpyAsync with no staging.
+    // CLAHE on/off or clip change: restart from this frame so the sudden
+    // brightness change does not generate a burst of events.
+    if (resetRequested_.exchange(false))
+        initialized_ = false;
+
+    // Snapshot the CLAHE settings once so one frame never sees a mix of
+    // old and new values if a setter runs concurrently.
+    const bool  useClahe   = claheEnabled_.load();
+    const float claheClip  = claheClip_.load();
+    const int   claheBits  = claheBits_.load();
+    const int   claheShift = claheShift_.load();
+
+   
     for (int y = 0; y < height_; ++y) {
         std::memcpy(h_image_ + static_cast<size_t>(y) * width_,
                     image + static_cast<size_t>(y) * stridePixels,
                     static_cast<size_t>(width_) * sizeof(uint16_t));
     }
-    CUDA_CHECK(cudaMemcpyAsync(d_image_, h_image_,
-                                static_cast<size_t>(width_) * height_ * sizeof(uint16_t),
+
+    const size_t imgBytes = static_cast<size_t>(width_) * height_ * sizeof(uint16_t);
+
+    // With CLAHE on: upload to d_imageRaw_, enhance into d_image_.
+    // With CLAHE off: upload straight into d_image_ as before.
+    // Everything after this point reads d_image_ and is unchanged: the
+    // enhanced image is on the same 0..(2^bits-1) scale as the raw one, so
+    // the event kernels need no changes.
+    CUDA_CHECK(cudaMemcpyAsync(useClahe ? d_imageRaw_ : d_image_, h_image_, imgBytes,
                                 cudaMemcpyHostToDevice, stream_));
+    if (useClahe)
+    {
+        clahe_->setFormat(claheBits, claheShift);   // no-op unless changed
+        clahe_->setParams(claheClip, 8, 8);         // cheap: tile grid is fixed
+        clahe_->applyU16(d_imageRaw_, static_cast<size_t>(width_) * sizeof(uint16_t),
+                         d_image_,    static_cast<size_t>(width_) * sizeof(uint16_t),
+                         stream_);
+    }
+
+    // Optional copy of the frame the event kernels will see, for display.
+    inputValid_ = false;
+    auto fetchInput = [&] {
+        if (captureInput_)
+        {
+            CUDA_CHECK(cudaMemcpyAsync(h_inputCopy_, d_image_, imgBytes,
+                                        cudaMemcpyDeviceToHost, stream_));
+            inputValid_ = true;
+        }
+    };
+
     const int cuda_blocks = 32;
     const int cuda_threads = 8;
     const dim3 block(cuda_blocks, cuda_threads);
@@ -476,6 +519,7 @@ EventPacket EventGeneratorCUDA::generate(
                 d_rngStates_, width_, height_, static_cast<unsigned long long>(rngSeed_));
         }
         CUDA_CHECK(cudaGetLastError());
+        fetchInput();
         CUDA_CHECK(cudaStreamSynchronize(stream_));
 
         initialized_ = true;
@@ -486,20 +530,14 @@ EventPacket EventGeneratorCUDA::generate(
         return packet;
     }
 
-    // Guard against a non-increasing timestamp (jitter/repeats from real
-    // hardware clocks) the same way the CPU EventGenerator does -- nudge it
-    // forward slightly rather than dividing by zero/negative dt below.
+
     double dtFrameSeconds = timestamp - previousTimestamp_;
     if (dtFrameSeconds <= 0.0)
     {
         dtFrameSeconds = 1e-6;
     }
     // Sensor K coefficients (see dvs_types.hpp / sensor_k_preset) are
-    // calibrated assuming timestamps in MICROSECONDS -- convert here so the
-    // drift math matches the CPU reference regardless of this project's
-    // native double-seconds Event::timestamp convention. Event timestamps
-    // themselves are still produced in seconds below (frameStartTime +
-    // frac * dtFrameSeconds), since `frac` is a dimensionless ratio.
+    // calibrated assuming timestamps in MICROSECONDS 
     const double dtFrameUs = dtFrameSeconds * 1e6;
 
     // Reset only the leading event-count int, not the whole output buffer.
@@ -528,6 +566,10 @@ EventPacket EventGeneratorCUDA::generate(
             maxEvents_, d_outputBuffer_);
     }
     CUDA_CHECK(cudaGetLastError());
+
+    // d_image_ is read-only for the event kernels, so this copy can be
+    // queued right behind them on the same stream.
+    fetchInput();
 
     // Fixed-size D2H copy every single frame (count + full event capacity)
     // -- this is the key change for stable timing. A copy sized to the
