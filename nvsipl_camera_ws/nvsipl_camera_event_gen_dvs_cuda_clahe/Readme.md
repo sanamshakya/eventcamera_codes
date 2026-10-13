@@ -275,7 +275,8 @@ After setting the `fastDeterministicMode`, rebuild the `EventGenratorCUDA.cu` cu
 - Use the updated make file with OpenCV support
 	- If cuda kernel compilation fails use `nvcc` compiler for compiling the cuda kernel
 	```
-	nvcc -O2 -std=c++17 -arch=sm_87 EventGeneratorCUDA.cu EventGeneratorCUDA.o
+	nvcc -O2 -std=c++17 -arch=sm_87 -c EventGeneratorCUDA.cu -o EventGeneratorCUDA.o
+	nvcc -O2 -std=c++17 -arch=sm_87 -c ClaheCuda.cu -o ClaheCuda.o
 	```
 - Update the `main.cpp` for enabling the event generation by adding following lines at `upCons` initialization : 
 ```
