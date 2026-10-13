@@ -298,7 +298,7 @@ if (cmdline.bShowMetadata) {
 ```
 - Next build the code by running the make command : 
 ```
-make
+make EVSIM_ENABLE_CUDA=1
 ```
 
 ## Running the application :
