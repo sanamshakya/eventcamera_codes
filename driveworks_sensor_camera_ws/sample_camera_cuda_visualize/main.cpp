@@ -1214,8 +1214,11 @@ public:
 
     void processEvents(dwCameraFrameHandle_t frame, uint32_t cameraIndex)
     {
+        printf("procesEvents : start of event processing \n");
         if (!m_eventGen || cameraIndex != m_eventCamera)
             return;
+
+        printf("processEvents : eventgen flag checked \n");
 
         if (m_eventUseRaw)
         {
@@ -1427,6 +1430,7 @@ public:
             }
 
             // Event generation runs on the same frame, before it is returned.
+            printf("onRender : start of process events\n");
             processEvents(frame[i], i);
 #if (VIBRANTE_PDK_DECIMAL >= 6000200) || defined(LINUX_AND_EMU)
             dwImageHandle_t img = DW_NULL_HANDLE;
