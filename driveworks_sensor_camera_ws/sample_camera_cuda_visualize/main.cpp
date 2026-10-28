@@ -1214,7 +1214,8 @@ public:
 
     void processEvents(dwCameraFrameHandle_t frame, uint32_t cameraIndex)
     {
-        printf("procesEvents : start of event processing \n");
+        printf("processEvents : start of event processing \n");
+        printf ("processEvents : cameraIndex - %d, eventCamera - %d \n", cameraIndex, m_eventCamera);
         if (!m_eventGen || cameraIndex != m_eventCamera)
             return;
 
