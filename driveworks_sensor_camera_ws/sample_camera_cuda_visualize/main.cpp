@@ -1216,6 +1216,10 @@ public:
     {
         printf("processEvents : start of event processing \n");
         printf ("processEvents : cameraIndex - %d, eventCamera - %d \n", cameraIndex, m_eventCamera);
+        int eventGen_check = 0;
+        if (m_eventGen)
+            eventGen_check = 1;
+        printf("processEvents : eventgen check flag - %d \n", eventGen_check);
         if (!m_eventGen || cameraIndex != m_eventCamera)
             return;
 
