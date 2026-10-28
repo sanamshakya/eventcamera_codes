@@ -4,47 +4,72 @@
 #include <cstdint>
 
 // IMPORTANT: use the project's REAL headers here, not local stand-ins.
-// Config.h must now define (see the evsim_integration Config.h delivered
-// earlier in this project):
+// Config.h must define:
 //   - std::string sensorType         (selects dvs::sensor_k_preset)
 //   - bool        fastDeterministicMode
 //   - double      contrastThresholdOn / contrastThresholdOff
-// positiveThreshold/negativeThreshold (the old linear-model fields) are no
-// longer read by this class -- they were the previous model's thresholds,
-// not this one's.
 #include "Config.h"
 #include "Event.h"
 #include "EventPacket.h"
 #include "IEventGenerator.h"
+#include "GenProfiler.h"
 
 // dvs_core: only dvs_types.hpp is needed here (SensorK + sensor_k_preset are
-// header-only, host-side helpers) -- no link dependency on event_sim.cpp/.o.
-// Make sure dvs_core's include/ dir is on this target's include path (both
-// the nvcc compile of the .cu and any .cpp that includes this .cuh).
+// header-only, host-side helpers).
 #include "dvs_types.hpp"
 
 namespace evsim
 {
 
-// DVS-Voltmeter per-pixel state. Replaces the old {referenceIntensity,
-// referenceTime} pair: this model compares against the PREVIOUS FRAME's raw
-// intensity (updated unconditionally every call, not just on a crossing) and
-// carries a residual sub-threshold voltage across frames -- see
-// dvs::EventSim::generate_events() (event_sim.cpp) for the CPU/OpenMP
-// reference this mirrors. Frame timing (previousTimestamp_) is tracked
-// host-side instead of per-pixel -- see the note in the .cu.
-struct PixelStateGPU
+// DVS-Voltmeter per-pixel state (see dvs::EventSim::generate_events()).
+// alignas(8) lets the compiler use one 64-bit load/store per pixel state.
+struct alignas(8) PixelStateGPU
 {
     float baseIntensity; // previous frame's raw pixel value (dvs_core: base_frame_)
     float deltaVdRes;    // residual sub-threshold voltage carried forward (dvs_core: delta_vd_res_)
 };
 
+// ---------------------------------------------------------------------------
+// Stochastic-path instrumentation
+// ---------------------------------------------------------------------------
+
+// Safety cap on threshold crossings simulated per pixel per frame.
+constexpr int kStochMaxCrossings = 16;
+
+enum StochPhase : int
+{
+    PH_G_LOAD = 0, PH_G_DRIFT, PH_G_TEST, PH_G_APPEND, PH_G_ADVANCE, // gate kernel
+    PH_B_LOAD, PH_B_PROB, PH_B_SAMPLE, PH_B_EMIT, PH_B_STORE,        // event kernel
+    PH_COUNT
+};
+
+// Zeroed once per frame (cudaMemsetAsync), copied back once per frame.
+// numCandidates / numCapHit / numBadDeltaT are always maintained;
+// iterHist / cycles are only filled when built with -DEVSIM_KERNEL_PROF.
+struct StochCounters
+{
+    unsigned int numCandidates;
+    unsigned int numCapHit;                        // pixels that hit kStochMaxCrossings
+    unsigned int numBadDeltaT;                     // NaN / <=0 waiting times
+    unsigned int iterHist[kStochMaxCrossings + 1]; // [k] = candidate pixels with exactly k events
+    unsigned long long cycles[PH_COUNT];           // summed per-thread clock64 cycles
+};
+
+// Host-side accumulator, reported every 100 frames.
+struct StochProfHost
+{
+    int frames = 0;
+    double msGate = 0, msEvents = 0;
+    unsigned long long cand = 0, capHit = 0, bad = 0;
+    unsigned long long hist[kStochMaxCrossings + 1] = {};
+    unsigned long long cyc[PH_COUNT] = {};
+};
+
 class EventGeneratorCUDA : public IEventGenerator
 {
 public:
-    // maxEventsPerFrame: hard cap on events/frame. Sized this way (not
-    // grown dynamically) is what keeps the D2H copy a fixed size every
-    // frame -- see generate(). Tune to your scene's worst-case motion.
+    // maxEventsPerFrame: hard cap on events/frame (buffer is sized once, so
+    // the output buffer never reallocates).
     explicit EventGeneratorCUDA(const Config &config, int maxEventsPerFrame = 200000);
     ~EventGeneratorCUDA() override;
 
@@ -54,16 +79,17 @@ public:
     void initialize(int width, int height) override;
     void reset() override;
 
-    // image: HOST pointer. stridePixels: row stride of `image` in
-    // uint16_t elements (matches your existing CaptureRawBayerBuffer /
-    // downscale interface). Pass a pointer into PINNED memory here if you
-    // can (see notes in the .cu) -- it removes another source of jitter.
-    //
-    // width/height here match IEventGenerator's signature so this is a
-    // drop-in replacement for EventGenerator in CNvSIPLConsumer: they are
-    // only used to lazily initialize() on the first call if you haven't
-    // called initialize() explicitly already (CNvSIPLConsumer does call it
-    // explicitly today, so in practice these are only a safety net).
+    // Stochastic path only: enable/disable the candidate gate and set its
+    // confidence z (z=5 -> ~6e-7 missed-crossing probability per barrier per
+    // pixel per frame). Disabled => every pixel is a candidate (exact path).
+    void setGate(bool enabled, float z = 5.0f)
+    {
+        gateEnabled_ = enabled;
+        gateZ_ = z;
+    }
+
+    // image: HOST pointer. stridePixels: row stride of `image` in uint16_t
+    // elements. width/height only matter for lazy initialize().
     EventPacket generate(
         const uint16_t *image,
         int width,
@@ -71,34 +97,10 @@ public:
         int stridePixels,
         double timestamp) override;
 
-    // Zero-host-copy entry point: `dImage` is a DEVICE pointer to a
-    // single-channel uint16 plane (e.g. a DriveWorks dwImageCUDA raw plane,
-    // dptr[0]) with row pitch `pitchBytes` (dwImageCUDA::pitch[0]).
-    //
-    // `rightShift` is applied per pixel while the plane is repacked into the
-    // generator's tightly-packed internal image -- use it when the sensor
-    // delivers N-bit data left-aligned in 16 bits (e.g. 12-bit in the top of
-    // a uint16 -> rightShift = 4) so values match the K-preset's range.
-    //
-    // width/height must match initialize(). The call is synchronous (it
-    // waits on the generator's stream before returning), so the caller may
-    // return/recycle the source image as soon as it returns.
-    // Not part of IEventGenerator: CUDA-only.
-    EventPacket generateFromDevice(
-        const uint16_t *dImage,
-        int width,
-        int height,
-        size_t pitchBytes,
-        double timestamp,
-        int rightShift = 0);
-
 private:
-    // Shared per-frame path once d_image_ holds the current frame
-    // (tightly packed): init-first-frame / kernel launch / D2H / packet.
-    EventPacket processStagedFrame(double timestamp);
-
     void allocateDeviceBuffers();
     void freeDeviceBuffers();
+    void accumulateStochProfile(size_t numPixels);
 
     Config config_;
     dvs::SensorK k_; // resolved once from config_.sensorType in the constructor
@@ -107,33 +109,38 @@ private:
     int maxEvents_ = 0;
     bool initialized_ = false;
     uint64_t frameNumber_ = 0;
-    uint64_t rngSeed_ = 0xC0FFEEu; // only used in stochastic mode
+    uint64_t rngSeed_ = 0xC0FFEEu; // stochastic mode: Philox seed
 
-    // Frame timing tracked host-side (this replaces the old per-pixel
-    // referenceTime + the h_pixel0_ device->host snapshot copy entirely --
-    // the previous frame's timestamp is already known to the host, no need
-    // to round-trip it through the GPU). See generate() in the .cu.
+    // Frame timing tracked host-side.
     double previousTimestamp_ = 0.0;
 
     cudaStream_t stream_ = nullptr;
 
-    // Device buffers (persistent across frames -- allocated once in
-    // initialize(), never per-frame. Per-frame cudaMalloc/cudaFree is a
-    // major, avoidable source of latency variance.)
-    uint16_t       *d_image_       = nullptr; // width_*height_, tightly packed
-    PixelStateGPU  *d_pixelStates_ = nullptr; // width_*height_
-    uint8_t        *d_outputBuffer_ = nullptr; // [int eventCount][Event x maxEvents_]
+    // Device buffers (persistent across frames).
+    uint16_t      *d_image_        = nullptr; // width_*height_, tightly packed
+    PixelStateGPU *d_pixelStates_  = nullptr; // width_*height_
+    uint8_t       *d_outputBuffer_ = nullptr; // [int eventCount][Event x maxEvents_]
 
-    // Only allocated when !config_.fastDeterministicMode -- the deterministic
-    // path never touches an RNG, so there's no reason to pay for this buffer
-    // (width_*height_*sizeof(curandState), which is not small) when running fast.
-    curandState *d_rngStates_ = nullptr;
+    // Stochastic path only (the Philox RNG is stateless: no per-pixel RNG buffer).
+    int           *d_candList_ = nullptr;     // width_*height_ pixel indices
+    StochCounters *d_counters_ = nullptr;
+    StochCounters *h_counters_ = nullptr;     // pinned
 
-    // Pinned host mirrors -- required for predictable-latency DMA.
+    // Pinned host mirrors.
     uint16_t *h_image_        = nullptr;
     uint8_t  *h_outputBuffer_ = nullptr;
 
     size_t outputBufferBytes_ = 0;
+
+    // Stochastic path configuration / profiling.
+    float gateZ_ = 5.0f;
+    bool  gateEnabled_ = true;
+    int   numSMs_ = 0;
+    int floorMode_ = -1;
+    cudaEvent_t sEv_[3] = {nullptr, nullptr, nullptr};
+    StochProfHost sprof_;
+
+    GenProfiler prof_{100, 5}; // report every 100 frames, ignore first 5
 };
 
 } // namespace evsim
