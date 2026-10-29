@@ -875,7 +875,9 @@ public:
             else
             {
                 dwImageProperties evProps{};
-                const dwCameraOutputType evType = m_eventUseRaw ? DW_CAMERA_OUTPUT_NATIVE_RAW
+                // const dwCameraOutputType evType = m_eventUseRaw ? DW_CAMERA_OUTPUT_NATIVE_RAW
+                //                                                 : DW_CAMERA_OUTPUT_CUDA_RGBA_UINT8;
+                const dwCameraOutputType evType = m_eventUseRaw ?  DW_CAMERA_OUTPUT_CUDA_RAW_UINT16 
                                                                 : DW_CAMERA_OUTPUT_CUDA_RGBA_UINT8;
                 CHECK_DW_ERROR(dwSensorCamera_getImageProperties(&evProps, evType, m_camera[m_eventCamera]));
                 m_eventW = evProps.width;
@@ -1179,7 +1181,8 @@ public:
     void processEventsRaw(dwCameraFrameHandle_t frame, uint32_t cameraIndex)
     {
         dwImageHandle_t raw = DW_NULL_HANDLE;
-        CHECK_DW_ERROR(dwSensorCamera_getImage(&raw, DW_CAMERA_OUTPUT_NATIVE_RAW, frame));
+        // CHECK_DW_ERROR(dwSensorCamera_getImage(&raw, DW_CAMERA_OUTPUT_NATIVE_RAW, frame));
+        CHECK_DW_ERROR(dwSensorCamera_getImage(&raw,  DW_CAMERA_OUTPUT_CUDA_RAW_UINT16 , frame));
 
         dwTime_t timestampUs = 0;
         CHECK_DW_ERROR(dwImage_getTimestamp(&timestampUs, raw));
