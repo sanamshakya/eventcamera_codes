@@ -830,6 +830,100 @@ public:
 
         CHECK_DW_ERROR(dwSAL_start(m_sal));
 
+        
+
+        //------------------------------------------------------------------------------
+        // initializes streamers
+        // -----------------------------------------
+        if (m_useProcessed)
+        {
+            dwImageProperties imageProperties{};
+            for (uint32_t i = 0; i < m_totalCameras; ++i)
+            {
+                std::cout << "onInitialize: getting image props " << i << std::endl;
+                CHECK_DW_ERROR(dwSensorCamera_getImageProperties(&imageProperties, DW_CAMERA_OUTPUT_CUDA_RGBA_UINT8, m_camera[i]));
+
+                std::cout << "onInitialize: initilizing stream: " << i << std::endl;
+                CHECK_DW_ERROR(dwImageStreamerGL_initialize(&m_streamerToGL[i], &imageProperties, DW_IMAGE_GL, m_context));
+
+                CHECK_DW_ERROR(dwImageStreamer_initialize(&m_streamerToCPUGrab[i], &imageProperties, DW_IMAGE_CPU, m_context));
+            }
+        }
+
+        //------------------------------------------------------------------------------
+        // initializes evsim CUDA event generator
+        // -----------------------------------------
+        if (std::stoi(getArgument("enable-events")) > 0)
+        {
+            m_eventCamera = static_cast<uint32_t>(std::stoi(getArgument("event-camera")));
+            m_eventUseRaw = (getArgument("event-input") == "raw");
+            m_eventRawShift = std::stoi(getArgument("event-raw-shift"));
+            if (m_eventUseRaw && !m_useRaw)
+            {
+                logWarn("event-input=raw but the rig does not request a raw output "
+                        "(add 'raw' to output-requested, or use --event-input=rgba); events disabled.\n");
+            }
+            else if (!m_eventUseRaw && !m_useProcessed)
+            {
+                logWarn("event-input=rgba needs a processed (RGBA) output; events disabled.\n");
+            }
+            else if (m_eventCamera >= m_totalCameras)
+            {
+                logWarn("event-camera %u out of range (%u cameras); events disabled.\n",
+                        m_eventCamera, m_totalCameras);
+            }
+            else
+            {
+                dwImageProperties evProps{};
+                const dwCameraOutputType evType = m_eventUseRaw ? DW_CAMERA_OUTPUT_NATIVE_RAW
+                                                                : DW_CAMERA_OUTPUT_CUDA_RGBA_UINT8;
+                CHECK_DW_ERROR(dwSensorCamera_getImageProperties(&evProps, evType, m_camera[m_eventCamera]));
+                m_eventW = evProps.width;
+                m_eventH = evProps.height;
+
+                log("onInitialize: event input %s: type %d format %d %ux%u\n",
+                    m_eventUseRaw ? "raw" : "rgba",
+                    static_cast<int>(evProps.type), static_cast<int>(evProps.format),
+                    evProps.width, evProps.height);
+
+                if (m_eventUseRaw)
+                {
+                    // NvSci raw image -> CUDA image (pitch-linear, device-accessible).
+                    CHECK_DW_ERROR(dwImageStreamer_initialize(&m_streamerRawToCUDA, &evProps, DW_IMAGE_CUDA, m_context));
+                }
+
+                evsim::Config cfg;
+                cfg.sensorType = getArgument("event-sensor");
+                cfg.fastDeterministicMode = std::stoi(getArgument("event-deterministic")) > 0;
+                cfg.contrastThresholdOn = std::stod(getArgument("event-threshold-on"));
+                cfg.contrastThresholdOff = std::stod(getArgument("event-threshold-off"));
+
+                const int maxEvents = std::stoi(getArgument("event-max"));
+                m_eventGen.reset(new evsim::EventGeneratorCUDA(cfg, maxEvents));
+                // Explicit initialize(): the generator does not handle resolution
+                // changes mid-stream, so size it from the real camera output.
+                m_eventW = evProps.width;
+                m_eventH = evProps.height;
+                m_eventGen->initialize(static_cast<int>(evProps.width), static_cast<int>(evProps.height));
+
+                m_evOn.reserve(m_eventDrawCap);
+                m_evOff.reserve(m_eventDrawCap);
+
+                m_lumaBuf.assign(static_cast<size_t>(evProps.width) * evProps.height, 0);
+
+                const std::string &csvPath = getArgument("event-csv");
+                if (!csvPath.empty())
+                {
+                    m_eventCsv.open(csvPath);
+                    m_eventCsv << "x,y,timestamp_s,polarity\n";
+                }
+
+                log("onInitialize: event generator on camera %u (%ux%u, %s mode)\n",
+                    m_eventCamera, evProps.width, evProps.height,
+                    cfg.fastDeterministicMode ? "deterministic" : "stochastic");
+            }
+        }
+
         // -----------------------------
         // Initialize Renderer
         // -----------------------------
@@ -948,98 +1042,6 @@ public:
 
                 CHECK_DW_ERROR(dwImage_create(&m_evImg, p, m_context));
                 CHECK_DW_ERROR(dwImageStreamerGL_initialize(&m_streamerEvToGL, &p, DW_IMAGE_GL, m_context));
-            }
-        }
-
-        //------------------------------------------------------------------------------
-        // initializes streamers
-        // -----------------------------------------
-        if (m_useProcessed)
-        {
-            dwImageProperties imageProperties{};
-            for (uint32_t i = 0; i < m_totalCameras; ++i)
-            {
-                std::cout << "onInitialize: getting image props " << i << std::endl;
-                CHECK_DW_ERROR(dwSensorCamera_getImageProperties(&imageProperties, DW_CAMERA_OUTPUT_CUDA_RGBA_UINT8, m_camera[i]));
-
-                std::cout << "onInitialize: initilizing stream: " << i << std::endl;
-                CHECK_DW_ERROR(dwImageStreamerGL_initialize(&m_streamerToGL[i], &imageProperties, DW_IMAGE_GL, m_context));
-
-                CHECK_DW_ERROR(dwImageStreamer_initialize(&m_streamerToCPUGrab[i], &imageProperties, DW_IMAGE_CPU, m_context));
-            }
-        }
-
-        //------------------------------------------------------------------------------
-        // initializes evsim CUDA event generator
-        // -----------------------------------------
-        if (std::stoi(getArgument("enable-events")) > 0)
-        {
-            m_eventCamera = static_cast<uint32_t>(std::stoi(getArgument("event-camera")));
-            m_eventUseRaw = (getArgument("event-input") == "raw");
-            m_eventRawShift = std::stoi(getArgument("event-raw-shift"));
-            if (m_eventUseRaw && !m_useRaw)
-            {
-                logWarn("event-input=raw but the rig does not request a raw output "
-                        "(add 'raw' to output-requested, or use --event-input=rgba); events disabled.\n");
-            }
-            else if (!m_eventUseRaw && !m_useProcessed)
-            {
-                logWarn("event-input=rgba needs a processed (RGBA) output; events disabled.\n");
-            }
-            else if (m_eventCamera >= m_totalCameras)
-            {
-                logWarn("event-camera %u out of range (%u cameras); events disabled.\n",
-                        m_eventCamera, m_totalCameras);
-            }
-            else
-            {
-                dwImageProperties evProps{};
-                const dwCameraOutputType evType = m_eventUseRaw ? DW_CAMERA_OUTPUT_NATIVE_RAW
-                                                                : DW_CAMERA_OUTPUT_CUDA_RGBA_UINT8;
-                CHECK_DW_ERROR(dwSensorCamera_getImageProperties(&evProps, evType, m_camera[m_eventCamera]));
-                m_eventW = evProps.width;
-                m_eventH = evProps.height;
-
-                log("onInitialize: event input %s: type %d format %d %ux%u\n",
-                    m_eventUseRaw ? "raw" : "rgba",
-                    static_cast<int>(evProps.type), static_cast<int>(evProps.format),
-                    evProps.width, evProps.height);
-
-                if (m_eventUseRaw)
-                {
-                    // NvSci raw image -> CUDA image (pitch-linear, device-accessible).
-                    CHECK_DW_ERROR(dwImageStreamer_initialize(&m_streamerRawToCUDA, &evProps, DW_IMAGE_CUDA, m_context));
-                }
-
-                evsim::Config cfg;
-                cfg.sensorType = getArgument("event-sensor");
-                cfg.fastDeterministicMode = std::stoi(getArgument("event-deterministic")) > 0;
-                cfg.contrastThresholdOn = std::stod(getArgument("event-threshold-on"));
-                cfg.contrastThresholdOff = std::stod(getArgument("event-threshold-off"));
-
-                const int maxEvents = std::stoi(getArgument("event-max"));
-                m_eventGen.reset(new evsim::EventGeneratorCUDA(cfg, maxEvents));
-                // Explicit initialize(): the generator does not handle resolution
-                // changes mid-stream, so size it from the real camera output.
-                m_eventW = evProps.width;
-                m_eventH = evProps.height;
-                m_eventGen->initialize(static_cast<int>(evProps.width), static_cast<int>(evProps.height));
-
-                m_evOn.reserve(m_eventDrawCap);
-                m_evOff.reserve(m_eventDrawCap);
-
-                m_lumaBuf.assign(static_cast<size_t>(evProps.width) * evProps.height, 0);
-
-                const std::string &csvPath = getArgument("event-csv");
-                if (!csvPath.empty())
-                {
-                    m_eventCsv.open(csvPath);
-                    m_eventCsv << "x,y,timestamp_s,polarity\n";
-                }
-
-                log("onInitialize: event generator on camera %u (%ux%u, %s mode)\n",
-                    m_eventCamera, evProps.width, evProps.height,
-                    cfg.fastDeterministicMode ? "deterministic" : "stochastic");
             }
         }
 
