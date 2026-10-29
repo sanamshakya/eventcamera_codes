@@ -77,6 +77,8 @@
 #include <framework/ScreenshotHelper.hpp>
 #include <framework/WindowGLFW.hpp>
 
+#include <algorithm>
+
 using namespace dw_samples::common;
 
 #define MAX_PORTS_COUNT 4 // the number of device blocks, each with multiple cameras
@@ -201,7 +203,8 @@ private:
     bool m_eventDisplay = false; // extra tile showing the last packet
     uint32_t m_eventW = 0;
     uint32_t m_eventH = 0;
-    size_t m_eventDrawCap = 100000; // max points drawn per colour per frame
+    // size_t m_eventDrawCap = 100000; // max points drawn per colour per frame
+    size_t m_eventDrawCap = 30000;
     std::vector<dwVector2f> m_evOn;
     std::vector<dwVector2f> m_evOff;
 
@@ -1166,6 +1169,24 @@ public:
         publishEvents(packet, cameraIndex);
     }
 
+    // Draw a point list in chunks so each call fits the render engine's internal buffer.
+    void drawPoints(const std::vector<dwVector2f>& pts, dwRenderEngineColorRGBA color)
+    {
+        if (pts.empty())
+            return;
+
+        dwRenderEngine_setColor(color, m_renderEngine);
+
+        constexpr size_t CHUNK = 8192; // 64 KB per call
+        for (size_t start = 0; start < pts.size(); start += CHUNK)
+        {
+            const uint32_t n = static_cast<uint32_t>(std::min(CHUNK, pts.size() - start));
+            CHECK_DW_ERROR(dwRenderEngine_render(DW_RENDER_ENGINE_PRIMITIVE_TYPE_POINTS_2D,
+                                                 pts.data() + start, sizeof(dwVector2f), 0, n,
+                                                 m_renderEngine));
+        }
+    }
+
     void renderEventTile()
     {
         if (!m_eventDisplay || m_eventW == 0 || m_eventH == 0)
@@ -1182,17 +1203,19 @@ public:
 
         if (!m_evOn.empty())
         {
-            dwRenderEngine_setColor({1.0f, 0.2f, 0.2f, 1.0f}, m_renderEngine); // ON  = red
-            CHECK_DW_ERROR(dwRenderEngine_render(DW_RENDER_ENGINE_PRIMITIVE_TYPE_POINTS_2D,
-                                                 m_evOn.data(), sizeof(dwVector2f), 0,
-                                                 static_cast<uint32_t>(m_evOn.size()), m_renderEngine));
+            // dwRenderEngine_setColor({1.0f, 0.2f, 0.2f, 1.0f}, m_renderEngine); // ON  = red
+            // CHECK_DW_ERROR(dwRenderEngine_render(DW_RENDER_ENGINE_PRIMITIVE_TYPE_POINTS_2D,
+            //                                      m_evOn.data(), sizeof(dwVector2f), 0,
+            //                                      static_cast<uint32_t>(m_evOn.size()), m_renderEngine));
+            drawPoints(m_evOn,  {1.0f, 0.2f, 0.2f, 1.0f}); // ON  = red
         }
         if (!m_evOff.empty())
         {
-            dwRenderEngine_setColor({0.2f, 0.5f, 1.0f, 1.0f}, m_renderEngine); // OFF = blue
-            CHECK_DW_ERROR(dwRenderEngine_render(DW_RENDER_ENGINE_PRIMITIVE_TYPE_POINTS_2D,
-                                                 m_evOff.data(), sizeof(dwVector2f), 0,
-                                                 static_cast<uint32_t>(m_evOff.size()), m_renderEngine));
+            // dwRenderEngine_setColor({0.2f, 0.5f, 1.0f, 1.0f}, m_renderEngine); // OFF = blue
+            // CHECK_DW_ERROR(dwRenderEngine_render(DW_RENDER_ENGINE_PRIMITIVE_TYPE_POINTS_2D,
+            //                                      m_evOff.data(), sizeof(dwVector2f), 0,
+            //                                      static_cast<uint32_t>(m_evOff.size()), m_renderEngine));
+            drawPoints(m_evOff, {0.2f, 0.5f, 1.0f, 1.0f}); // OFF = blue
         }
 
         // HUD text
