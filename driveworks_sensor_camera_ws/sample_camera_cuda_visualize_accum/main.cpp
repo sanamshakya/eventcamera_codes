@@ -930,6 +930,10 @@ public:
 
             if (m_eventDisplay)
             {
+
+                if (m_eventW == 0 || m_eventH == 0)
+                    throw std::runtime_error("event display: camera reported 0x0 image");
+
                 m_evOnCnt.assign(size_t(m_eventW) * m_eventH, 0);
                 m_evOffCnt.assign(size_t(m_eventW) * m_eventH, 0);
 
@@ -940,6 +944,8 @@ public:
                 p.width = m_eventW;
                 p.height = m_eventH;
 
+                log("event display: creating %ux%u CPU RGBA image + GL streamer\n", p.width, p.height);
+   
                 CHECK_DW_ERROR(dwImage_create(&m_evImg, p, m_context));
                 CHECK_DW_ERROR(dwImageStreamerGL_initialize(&m_streamerEvToGL, &p, DW_IMAGE_GL, m_context));
             }
@@ -1012,9 +1018,10 @@ public:
                 m_eventGen.reset(new evsim::EventGeneratorCUDA(cfg, maxEvents));
                 // Explicit initialize(): the generator does not handle resolution
                 // changes mid-stream, so size it from the real camera output.
-                m_eventGen->initialize(static_cast<int>(evProps.width), static_cast<int>(evProps.height));
                 m_eventW = evProps.width;
                 m_eventH = evProps.height;
+                m_eventGen->initialize(static_cast<int>(evProps.width), static_cast<int>(evProps.height));
+
                 m_evOn.reserve(m_eventDrawCap);
                 m_evOff.reserve(m_eventDrawCap);
 
@@ -1199,8 +1206,7 @@ public:
                 static_cast<int>(imgCUDA->prop.height),
                 static_cast<size_t>(imgCUDA->pitch[0]),
                 static_cast<double>(timestampUs) * 1e-6 // us -> s
-                );
-
+            );
         }
         catch (...)
         {
