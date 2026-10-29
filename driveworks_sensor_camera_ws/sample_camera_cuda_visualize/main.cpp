@@ -1148,13 +1148,20 @@ public:
         {
             // generateFromDevice() is synchronous, so the streamer image can be
             // returned right after it.
-            packet = m_eventGen->generateFromDevice(
+            // packet = m_eventGen->generateFromDevice(
+            //     reinterpret_cast<const uint16_t *>(imgCUDA->dptr[0]),
+            //     static_cast<int>(imgCUDA->prop.width),
+            //     static_cast<int>(imgCUDA->prop.height),
+            //     static_cast<size_t>(imgCUDA->pitch[0]),
+            //     static_cast<double>(timestampUs) * 1e-6, // us -> s
+            //     m_eventRawShift);
+            packet = m_eventGen->generate(
                 reinterpret_cast<const uint16_t *>(imgCUDA->dptr[0]),
                 static_cast<int>(imgCUDA->prop.width),
                 static_cast<int>(imgCUDA->prop.height),
                 static_cast<size_t>(imgCUDA->pitch[0]),
                 static_cast<double>(timestampUs) * 1e-6, // us -> s
-                m_eventRawShift);
+                );
         }
         catch (...)
         {
