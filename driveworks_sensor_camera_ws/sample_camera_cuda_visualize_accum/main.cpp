@@ -1198,7 +1198,7 @@ public:
                 static_cast<int>(imgCUDA->prop.width),
                 static_cast<int>(imgCUDA->prop.height),
                 static_cast<size_t>(imgCUDA->pitch[0]),
-                static_cast<double>(timestampUs) * 1e-6, // us -> s
+                static_cast<double>(timestampUs) * 1e-6 // us -> s
                 );
 
         }
