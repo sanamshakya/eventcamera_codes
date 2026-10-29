@@ -1192,6 +1192,8 @@ public:
 
         dwImageCUDA *imgCUDA = nullptr;
         CHECK_DW_ERROR(dwImage_getCUDA(&imgCUDA, frameCUDA));
+        
+        log("processEventrsRaw : start of the event packet generation\n");
 
         evsim::EventPacket packet;
         try
@@ -1213,6 +1215,8 @@ public:
                 static_cast<double>(timestampUs) * 1e-6 // us -> s
             );
         }
+        log("processEvents : finishing event generation task per frame \n");
+        
         catch (...)
         {
             dwImageStreamer_consumerReturn(&frameCUDA, m_streamerRawToCUDA);
