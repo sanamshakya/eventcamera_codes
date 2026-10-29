@@ -1298,6 +1298,8 @@ public:
         // DriveWorks timestamps are microseconds; the generator expects seconds.
         const double timestampSec = static_cast<double>(timestampUs) * 1e-6;
 
+        printf("processEvents : start of rgba event generatoin\n");
+
         evsim::EventPacket packet = m_eventGen->generate(
             m_lumaBuf.data(), static_cast<int>(w), static_cast<int>(h),
             static_cast<int>(w), timestampSec);
