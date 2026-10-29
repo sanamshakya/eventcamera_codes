@@ -945,7 +945,7 @@ public:
                 p.height = m_eventH;
 
                 log("event display: creating %ux%u CPU RGBA image + GL streamer\n", p.width, p.height);
-   
+
                 CHECK_DW_ERROR(dwImage_create(&m_evImg, p, m_context));
                 CHECK_DW_ERROR(dwImageStreamerGL_initialize(&m_streamerEvToGL, &p, DW_IMAGE_GL, m_context));
             }
@@ -997,6 +997,9 @@ public:
                 const dwCameraOutputType evType = m_eventUseRaw ? DW_CAMERA_OUTPUT_NATIVE_RAW
                                                                 : DW_CAMERA_OUTPUT_CUDA_RGBA_UINT8;
                 CHECK_DW_ERROR(dwSensorCamera_getImageProperties(&evProps, evType, m_camera[m_eventCamera]));
+                m_eventW = evProps.width;
+                m_eventH = evProps.height;
+
                 log("onInitialize: event input %s: type %d format %d %ux%u\n",
                     m_eventUseRaw ? "raw" : "rgba",
                     static_cast<int>(evProps.type), static_cast<int>(evProps.format),
