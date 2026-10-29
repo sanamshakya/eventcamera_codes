@@ -1200,8 +1200,8 @@ public:
         log("processEventrsRaw : start of the event packet generation\n");
 
         evsim::EventPacket packet;
-        try
-        {
+        // try
+        // {
             // generateFromDevice() is synchronous, so the streamer image can be
             // returned right after it.
             // packet = m_eventGen->generateFromDevice(
@@ -1220,7 +1220,7 @@ public:
             );
             log("processEvents : finishing event generation task per frame \n");
         
-        }
+        // }
         
         // catch (...)
         // {
