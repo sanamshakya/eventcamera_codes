@@ -1214,8 +1214,9 @@ public:
                 static_cast<size_t>(imgCUDA->pitch[0]),
                 static_cast<double>(timestampUs) * 1e-6 // us -> s
             );
+            log("processEvents : finishing event generation task per frame \n");
+        
         }
-        log("processEvents : finishing event generation task per frame \n");
         
         catch (...)
         {
