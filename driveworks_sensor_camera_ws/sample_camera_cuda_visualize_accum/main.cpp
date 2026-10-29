@@ -888,11 +888,11 @@ public:
                     static_cast<int>(evProps.type), static_cast<int>(evProps.format),
                     evProps.width, evProps.height);
 
-                if (m_eventUseRaw)
-                {
-                    // NvSci raw image -> CUDA image (pitch-linear, device-accessible).
-                    CHECK_DW_ERROR(dwImageStreamer_initialize(&m_streamerRawToCUDA, &evProps, DW_IMAGE_CUDA, m_context));
-                }
+                // if (m_eventUseRaw)
+                // {
+                //     // NvSci raw image -> CUDA image (pitch-linear, device-accessible).
+                //     CHECK_DW_ERROR(dwImageStreamer_initialize(&m_streamerRawToCUDA, &evProps, DW_IMAGE_CUDA, m_context));
+                // }
 
                 evsim::Config cfg;
                 cfg.sensorType = getArgument("event-sensor");
@@ -1187,14 +1187,15 @@ public:
         dwTime_t timestampUs = 0;
         CHECK_DW_ERROR(dwImage_getTimestamp(&timestampUs, raw));
 
-        const dwTime_t timeout = 500000;
-        CHECK_DW_ERROR(dwImageStreamer_producerSend(raw, m_streamerRawToCUDA));
+        // const dwTime_t timeout = 500000;
+        // CHECK_DW_ERROR(dwImageStreamer_producerSend(raw, m_streamerRawToCUDA));
 
-        dwImageHandle_t frameCUDA = DW_NULL_HANDLE;
-        CHECK_DW_ERROR(dwImageStreamer_consumerReceive(&frameCUDA, timeout, m_streamerRawToCUDA));
+        // dwImageHandle_t frameCUDA = DW_NULL_HANDLE;
+        // CHECK_DW_ERROR(dwImageStreamer_consumerReceive(&frameCUDA, timeout, m_streamerRawToCUDA));
 
         dwImageCUDA *imgCUDA = nullptr;
-        CHECK_DW_ERROR(dwImage_getCUDA(&imgCUDA, frameCUDA));
+        // CHECK_DW_ERROR(dwImage_getCUDA(&imgCUDA, frameCUDA));
+        CHECK_DW_ERROR(dwImage_getCUDA(&imgCUDA, raw));
         
         log("processEventrsRaw : start of the event packet generation\n");
 
@@ -1221,15 +1222,15 @@ public:
         
         }
         
-        catch (...)
-        {
-            dwImageStreamer_consumerReturn(&frameCUDA, m_streamerRawToCUDA);
-            dwImageStreamer_producerReturn(nullptr, timeout, m_streamerRawToCUDA);
-            throw;
-        }
+        // catch (...)
+        // {
+        //     dwImageStreamer_consumerReturn(&frameCUDA, m_streamerRawToCUDA);
+        //     dwImageStreamer_producerReturn(nullptr, timeout, m_streamerRawToCUDA);
+        //     throw;
+        // }
 
-        CHECK_DW_ERROR(dwImageStreamer_consumerReturn(&frameCUDA, m_streamerRawToCUDA));
-        CHECK_DW_ERROR(dwImageStreamer_producerReturn(nullptr, timeout, m_streamerRawToCUDA));
+        // CHECK_DW_ERROR(dwImageStreamer_consumerReturn(&frameCUDA, m_streamerRawToCUDA));
+        // CHECK_DW_ERROR(dwImageStreamer_producerReturn(nullptr, timeout, m_streamerRawToCUDA));
 
         publishEvents(packet, cameraIndex);
     }
