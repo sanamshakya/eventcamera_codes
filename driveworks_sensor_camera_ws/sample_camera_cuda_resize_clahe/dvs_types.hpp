@@ -49,7 +49,7 @@ inline SensorK sensor_k_preset(const std::string& camera_type) {
         return SensorK{5.332474147628972, 0.9003332027266823, 8.288263352543993e-06,
                         1.0992397172828087e-07, 3.302652963977818e-09, 1.1012444038716504e-07};
     if (camera_type == "custom_sensor")
-        return SensorK{5.00, 1,  0.0001, 1e-7, 5e-9, 0.00001};
+        return SensorK{5.00, 1,  0.0001, 9.768e-8, 5e-9, 0.00001};
     return SensorK{}; // caller should validate camera_type before relying on this
 }
 
