@@ -1122,13 +1122,13 @@ public:
                     }
                 }
 
-                evsim::Config cfg; // ... unchanged ...
+                // evsim::Config cfg; // ... unchanged ...
                 m_eventGen.reset(new evsim::EventGeneratorCUDA(cfg, maxEvents));
                 m_eventGen->initialize(static_cast<int>(m_eventW), static_cast<int>(m_eventH)); // was evProps.*
 
                 m_lumaBuf.assign(size_t(m_eventW) * m_eventH, 0); // was evProps.*
 
-                m_lumaBuf.assign(static_cast<size_t>(evProps.width) * evProps.height, 0);
+                // m_lumaBuf.assign(static_cast<size_t>(evProps.width) * evProps.height, 0);
 
                 if (m_eventDisplay)
                 {
@@ -1553,9 +1553,13 @@ public:
         const double timestampSec = static_cast<double>(timestampUs) * 1e-6;
         checkEventTimestamp(timestampSec);
 
+        // evsim::EventPacket packet = m_eventGen->generate(
+        //     m_lumaBuf.data(), static_cast<int>(w), static_cast<int>(h),
+        //     static_cast<int>(w), timestampSec);
         evsim::EventPacket packet = m_eventGen->generate(
-            m_lumaBuf.data(), static_cast<int>(w), static_cast<int>(h),
-            static_cast<int>(w), timestampSec);
+            m_lumaBuf.data(), static_cast<int>(m_eventW), static_cast<int>(m_eventH),
+            static_cast<int>(m_eventW), timestampSec);
+
 
         publishEvents(packet, cameraIndex);
     }
