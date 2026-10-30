@@ -1497,7 +1497,8 @@ public:
 
         const uint32_t w = imgCPU->prop.width;
         const uint32_t h = imgCPU->prop.height;
-        if (m_lumaBuf.size() != static_cast<size_t>(w) * h)
+        // if (m_lumaBuf.size() != static_cast<size_t>(w) * h)
+        if (w != m_srcW || h != m_srcH)
         {
             // Never reallocate silently: generator was sized in onInitialize().
             CHECK_DW_ERROR(dwImageStreamer_consumerReturn(&frameCPU, m_streamerToCPUGrab[cameraIndex]));
