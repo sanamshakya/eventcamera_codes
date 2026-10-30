@@ -3,6 +3,8 @@ project(sample_camera)
 set(SOURCES
     main.cpp
     EventLogger.cpp
+    ClaheCuda.cu 
+    ResizeRaw.cu 
     EventGeneratorCUDA.cu
 )
 
