@@ -40,13 +40,13 @@ public:
 
     void runClahe(bool useClahe, float clip, int bits, int shift);
     // ---- CLAHE ----
-    std::unique_ptr<ClaheCuda> clahe_;
-    uint16_t *d_imageRaw_ = nullptr;   // un-enhanced frame when CLAHE is on; CLAHE writes d_image_
-    std::atomic<bool>  claheEnabled_{false};
-    std::atomic<float> claheClip_{2.0f};
-    std::atomic<int>   claheBits_{12};
-    std::atomic<int>   claheShift_{0};
-    std::atomic<bool>  resetRequested_{false};
+    // std::unique_ptr<ClaheCuda> clahe_;
+    // uint16_t *d_imageRaw_ = nullptr;   // un-enhanced frame when CLAHE is on; CLAHE writes d_image_
+    // std::atomic<bool>  claheEnabled_{false};
+    // std::atomic<float> claheClip_{2.0f};
+    // std::atomic<int>   claheBits_{12};
+    // std::atomic<int>   claheShift_{0};
+    // std::atomic<bool>  resetRequested_{false};
 };
 
 } // namespace evsim
