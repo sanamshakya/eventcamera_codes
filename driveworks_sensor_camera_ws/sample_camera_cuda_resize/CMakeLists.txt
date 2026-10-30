@@ -4,6 +4,7 @@ set(SOURCES
     main.cpp
     EventLogger.cpp
     EventGeneratorCUDA.cu
+    ResizeRaw.cu
 )
 
 set(LIBRARIES
