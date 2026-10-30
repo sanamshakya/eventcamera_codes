@@ -1393,9 +1393,9 @@ public:
         static bool logged = false;
         if (!logged)
         {
-            log("raw cuda: fmt %d %ux%u planes %u pitch %zu dptr %p\n",
+            log("raw cuda: fmt %d %ux%u pitch %zu dptr %p\n",
                 static_cast<int>(imgCUDA->prop.format), imgCUDA->prop.width, imgCUDA->prop.height,
-                imgCUDA->prop.planeCount, static_cast<size_t>(imgCUDA->pitch[0]),
+                static_cast<size_t>(imgCUDA->pitch[0]),
                 static_cast<void *>(imgCUDA->dptr[0]));
             logged = true;
         }
