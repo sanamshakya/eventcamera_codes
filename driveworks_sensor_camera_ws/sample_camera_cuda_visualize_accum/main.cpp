@@ -1159,7 +1159,7 @@ public:
         {
             for (const evsim::Event &e : packet.events)
             {
-                m_eventCsv << e.x << ',' << e.y << ',' << e.timestamp << ','
+                m_eventCsv << e.x << ',' << e.y << ',' << e.timestamp * 1e6 << ','
                            << static_cast<int>(e.polarity) << '\n';
             }
         }
