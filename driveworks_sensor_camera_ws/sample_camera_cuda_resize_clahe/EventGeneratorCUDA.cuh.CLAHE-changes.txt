@@ -1,0 +1,48 @@
+Changes to the CURRENT DriveWorks EventGeneratorCUDA.cuh (the one that has generateFromDevice / runFrame / prof_).
+Everything is taken from the nvsipl EventGeneratorCUDA_with_clahe.cuh, minus the optional "capture input frame" bits.
+
+1) Includes (top of file)
+---------------------------------------------------------------------
+#include <atomic>
+#include <memory>
+#include "ClaheCuda.cuh"
+
+
+2) Public API (next to generate() / generateFromDevice())
+---------------------------------------------------------------------
+    // ---- Optional on-GPU CLAHE pre-processing (off by default) ----
+    // Setters are thread-safe (atomics); a change restarts the per-pixel state on the
+    // next frame so the brightness jump does not become a burst of events.
+    void  setClaheEnabled(bool on);
+    bool  claheEnabled() const { return claheEnabled_.load(); }
+    void  setClaheClip(float clipLimit);
+    float claheClip() const { return claheClip_.load(); }
+    // bits: 8 or 12. inputShift: use 0 here -- generateFromDevice() already applies
+    // rawShift before CLAHE, so CLAHE sees data on the 0..(2^bits-1) scale.
+    void  setClaheFormat(int bits, int inputShift);
+
+(If your IEventGenerator.h already declares supportsClahe()/setClahe*() as virtual you may
+ add `override`; it is not required.)
+
+
+3) Private method (next to runFrame())
+---------------------------------------------------------------------
+    void runClahe(bool useClahe, float clip, int bits, int shift);
+
+
+4) Private members (next to d_image_ / h_image_)
+---------------------------------------------------------------------
+    // ---- CLAHE ----
+    std::unique_ptr<ClaheCuda> clahe_;
+    uint16_t *d_imageRaw_ = nullptr;   // un-enhanced frame when CLAHE is on; CLAHE writes d_image_
+    std::atomic<bool>  claheEnabled_{false};
+    std::atomic<float> claheClip_{2.0f};
+    std::atomic<int>   claheBits_{12};
+    std::atomic<int>   claheShift_{0};
+    std::atomic<bool>  resetRequested_{false};
+
+
+5) Build
+---------------------------------------------------------------------
+Add ClaheCuda.cu to the same CMake target as EventGeneratorCUDA.cu (and EventLogger.cpp,
+ResizeRaw.cu if not already there).
