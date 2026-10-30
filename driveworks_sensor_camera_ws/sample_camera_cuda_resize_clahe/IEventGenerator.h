@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "EventPacket.h"
+#include "ClaheCuda.cuh"
 
 namespace evsim
 {
