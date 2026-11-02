@@ -48,8 +48,10 @@ inline SensorK sensor_k_preset(const std::string& camera_type) {
     if (camera_type == "RGB2DVS346")
         return SensorK{5.332474147628972, 0.9003332027266823, 8.288263352543993e-06,
                         1.0992397172828087e-07, 3.302652963977818e-09, 1.1012444038716504e-07};
-    if (camera_type == "custom_sensor")
+    if (camera_type == "custom_sensor_rgba")
         return SensorK{5.00, 1,  0.0001, 9.768e-8, 1.466e-11, 0.00001};
+    if (camera_type == "custom_sensor_raw")
+        return SensorK{7.00, 1,  0.0001, 9.768e-8, 1.466e-11, 0.00001};
     return SensorK{}; // caller should validate camera_type before relying on this
 }
 
