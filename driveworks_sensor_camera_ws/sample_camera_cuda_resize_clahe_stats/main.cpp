@@ -850,7 +850,7 @@ public:
 
         // initialize logger to print verbose message on console in color
         dwLogger_initialize(getConsoleLoggerCallback(true));
-        dwLogger_setLogLevel(DW_LOG_VERBOSE);
+        dwLogger_setLogLevel(DW_LOG_INFO);
 
         initializeDriveWorks(m_context);
         CHECK_DW_ERROR(dwSAL_initialize(&m_sal, m_context));
@@ -1818,7 +1818,7 @@ void CameraCustomSimpleApp::initializeDriveWorks(dwContextHandle_t &context) con
 {
     // initialize logger to print verbose message on console in color
     CHECK_DW_ERROR(dwLogger_initialize(getConsoleLoggerCallback(true)));
-    CHECK_DW_ERROR(dwLogger_setLogLevel(DW_LOG_VERBOSE));
+    CHECK_DW_ERROR(dwLogger_setLogLevel(DW_LOG_INFO));
 
     // initialize SDK context, using data folder
     dwContextParameters sdkParams = {};
