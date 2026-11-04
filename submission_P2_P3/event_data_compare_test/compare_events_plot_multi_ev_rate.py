@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-compare_events.py - compares two or more captured event runs on exactly
-two measures:
+compare_events.py - compares any number (>= 2) of captured event runs on
+exactly two measures, with every run drawn together on one figure:
 
   1. Event rate: event count in fixed-width time bins (default 100 ms)
   2. Per-pixel inter-event interval (tau): time since the last event at
@@ -11,20 +11,21 @@ two measures:
      that span more than one frame, not events generated between two
      successive frames.
 
+The first --skip-s seconds (default 5) of every run are ignored.
+
 Reads the CSV pairs written by EventLogger (<label>.events.csv,
-<label>.frames.csv).
+<label>.frames.csv). Each label on the command line is one run.
 
 Usage:
     python3 compare_events.py raw clahe
-    python3 compare_events.py raw clahe --bin-ms 50
-    python3 compare_events.py raw clahe --tau-max-ms 40 --tau-cutoff-ms 30 --tau-bins 80
-    python3 compare_events.py raw clahe --skip-s 5     # ignore first 5 s (default)
-    python3 compare_events.py raw clahe --skip-s 0     # use the whole run
+    python3 compare_events.py prophesee raw clahe clahe_custom sim5 sim6
+    python3 compare_events.py a b c d --bin-ms 50 --skip-s 5
+    python3 compare_events.py a b c --tau-max-ms 40 --tau-cutoff-ms 30 --tau-bins 80
+    python3 compare_events.py a b c --out-prefix myexp   # myexp_rate.png, myexp_tau.png
 """
 
 import argparse
 import sys
-from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -36,6 +37,13 @@ FONT_TICK = 14
 FONT_LEGEND = 14
 LINEWIDTH = 2.5
 DPI = 180
+
+
+def get_colors(n: int):
+    """n distinct colours: tab10 for up to 10 runs, tab20 beyond that."""
+    import matplotlib
+    cmap = matplotlib.colormaps["tab10" if n <= 10 else "tab20"]
+    return [cmap(i % cmap.N) for i in range(n)]
 
 
 def load_run(label: str):
@@ -78,6 +86,21 @@ def bin_counts(frames: pd.DataFrame, bin_ms: float) -> np.ndarray:
     return per_bin.reindex(full_range, fill_value=0).to_numpy()
 
 
+def rate_stats(frames: pd.DataFrame, counts: np.ndarray, bin_ms: float):
+    """Average and peak event rate in Mega events/s.
+
+    avg = total events / duration, where duration is the span between the
+          first and last frame timestamp of the (trimmed) run.
+    max = highest event count in any one time bin / bin width, so it
+          depends on --bin-ms (a smaller bin gives a higher, spikier peak).
+    """
+    total = float(frames["event_count"].sum())
+    span = float(frames["t"].max() - frames["t"].min())
+    avg = total / span / 1e6 if span > 0 else float("nan")
+    peak = float(counts.max()) / (bin_ms / 1000.0) / 1e6
+    return total, span, avg, peak
+
+
 def compute_tau(events: pd.DataFrame) -> np.ndarray:
     """Per-pixel inter-event interval: for every event, time since the
     last event at that same pixel. A pixel's first event has no
@@ -87,17 +110,18 @@ def compute_tau(events: pd.DataFrame) -> np.ndarray:
     return tau.dropna().to_numpy()
 
 
-def plot_rate(label_a, bin_ms, ba, label_b, bb, out_path):
+def plot_rate(labels, bin_ms, counts, out_path):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(16, 8))
+    colors = get_colors(len(labels))
 
-    t_axis_a = np.arange(len(ba)) * bin_ms / 1000.0
-    t_axis_b = np.arange(len(bb)) * bin_ms / 1000.0
-    ax.plot(t_axis_a, ba, label=label_a, linewidth=LINEWIDTH, color="tab:blue")
-    ax.plot(t_axis_b, bb, label=label_b, linewidth=LINEWIDTH, color="tab:orange")
+    for label, c, color in zip(labels, counts, colors):
+        t_axis = np.arange(len(c)) * bin_ms / 1000.0
+        ax.plot(t_axis, c, label=label, linewidth=LINEWIDTH, color=color)
+
     ax.set_title(f"Events per {bin_ms:.0f} ms bin", fontsize=FONT_TITLE, pad=14)
     ax.set_xlabel("time (s)", fontsize=FONT_LABEL)
     ax.set_ylabel("event count", fontsize=FONT_LABEL)
@@ -111,31 +135,32 @@ def plot_rate(label_a, bin_ms, ba, label_b, bb, out_path):
     print(f"\n  [plot saved: {out_path}]")
 
 
-def plot_tau(label_a, tau_a, label_b, tau_b, out_path,
+def plot_tau(labels, taus, out_path,
              tau_max_ms=40.0, tau_cutoff_ms=30.0, n_bins=80):
-    """Linear-axis tau PDF over [0, tau_max_ms].
+    """Linear-axis tau PDF over [0, tau_max_ms] for every run.
 
     tau values (seconds) above tau_cutoff_ms are discarded before the
-    histogram is built, so the density is normalised over the kept
-    intervals only (they are not counted in the denominator).
+    histogram is built, so each density is normalised over that run's
+    kept intervals only (they are not counted in the denominator).
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(16, 8))
+    colors = get_colors(len(labels))
 
     # Never let the cutoff exceed the plotted range.
     cutoff_us = min(tau_cutoff_ms, tau_max_ms) * 1e3
     bins_us = np.linspace(0.0, tau_max_ms * 1e3, n_bins + 1)
 
-    print(f"\n  [tau plot: linear 0-{tau_max_ms:g} ms, "
+    print(f"\n[tau plot: linear 0-{tau_max_ms:g} ms, "
           f"keeping tau <= {min(tau_cutoff_ms, tau_max_ms):g} ms]")
 
-    for label, tau, color in ((label_a, tau_a, "tab:blue"),
-                              (label_b, tau_b, "tab:orange")):
+    for label, tau, color in zip(labels, taus, colors):
         tau_us = tau[tau > 0] * 1e6
         if len(tau_us) == 0:
+            print(f"  {label}: no repeat events, not plotted")
             continue
         kept = tau_us[tau_us <= cutoff_us]
         dropped = len(tau_us) - len(kept)
@@ -164,59 +189,11 @@ def plot_tau(label_a, tau_a, label_b, tau_b, out_path,
     print(f"  [plot saved: {out_path}]")
 
 
-def compare_pair(label_a, events_a, frames_a, label_b, events_b, frames_b,
-                 bin_ms, make_plots, tau_max_ms, tau_cutoff_ms, tau_bins,
-                 skip_s=5.0):
-    print(f"\n{'='*70}\n{label_a}  vs  {label_b}\n{'='*70}")
-
-    # ---- 0. Ignore the warm-up at the start of each run ----
-    for label, ev, fr in ((label_a, events_a, frames_a),
-                          (label_b, events_b, frames_b)):
-        print(f"  {label}: {len(ev)} events, {len(fr)} frames before trim")
-    events_a, frames_a = trim_run(events_a, frames_a, skip_s)
-    events_b, frames_b = trim_run(events_b, frames_b, skip_s)
-    print(f"  skipped first {skip_s:g} s of each run")
-    for label, ev, fr in ((label_a, events_a, frames_a),
-                          (label_b, events_b, frames_b)):
-        print(f"  {label}: {len(ev)} events, {len(fr)} frames kept")
-        if len(ev) == 0 or len(fr) == 0:
-            print(f"error: '{label}' has no data after skipping {skip_s:g} s "
-                  f"(run shorter than the skip?)", file=sys.stderr)
-            return
-
-    # ---- 1. Events per time bin ----
-    ba = bin_counts(frames_a, bin_ms)
-    bb = bin_counts(frames_b, bin_ms)
-
-    print(f"\n[events per {bin_ms:.0f} ms bin]")
-    print(f"  {label_a}: {len(ba)} bins  mean={ba.mean():.2f}  std={ba.std(ddof=1):.2f}")
-    print(f"  {label_b}: {len(bb)} bins  mean={bb.mean():.2f}  std={bb.std(ddof=1):.2f}")
-
-    # ---- 2. Per-pixel inter-event interval (tau) ----
-    tau_a = compute_tau(events_a)
-    tau_b = compute_tau(events_b)
-
-    print(f"\n[per-pixel inter-event interval (tau), all revisits]")
-    for label, tau in ((label_a, tau_a), (label_b, tau_b)):
-        if len(tau):
-            print(f"  {label}: n={len(tau)} pixel-revisits  "
-                  f"median={np.median(tau)*1e6:.1f} us  mean={tau.mean()*1e6:.1f} us")
-        else:
-            print(f"  {label}: no repeat events at any pixel")
-
-    if make_plots:
-        plot_rate(label_a, bin_ms, ba, label_b, bb,
-                  f"rate_{label_a}_vs_{label_b}.png")
-        plot_tau(label_a, tau_a, label_b, tau_b,
-                 f"tau_{label_a}_vs_{label_b}.png",
-                 tau_max_ms=tau_max_ms, tau_cutoff_ms=tau_cutoff_ms,
-                 n_bins=tau_bins)
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("labels", nargs="+", help="run labels, e.g. raw clahe clahe_custom")
+    ap.add_argument("labels", nargs="+",
+                    help="run labels (any number >= 2), e.g. raw clahe clahe_custom")
     ap.add_argument("--bin-ms", type=float, default=100.0,
                     help="time bin width (ms) for the event-rate comparison (default 100)")
     ap.add_argument("--tau-max-ms", type=float, default=40.0,
@@ -227,30 +204,66 @@ def main():
                     help="number of linear tau histogram bins (default 80)")
     ap.add_argument("--skip-s", type=float, default=5.0,
                     help="ignore the first N seconds of each run (default 5; 0 = use everything)")
+    ap.add_argument("--out-prefix", default="compare",
+                    help="output file prefix: <prefix>_rate.png, <prefix>_tau.png (default 'compare')")
     ap.add_argument("--no-plots", action="store_true")
     args = ap.parse_args()
 
+    labels = args.labels
+    if len(labels) < 2:
+        ap.error("need at least two runs to compare")
+    if len(set(labels)) != len(labels):
+        ap.error("duplicate run labels given")
+
+    # ---- load + trim every run once ----
     runs = {}
-    for label in args.labels:
+    for label in labels:
         try:
-            runs[label] = load_run(label)
+            events, frames = load_run(label)
         except FileNotFoundError as e:
             print(f"error: could not load '{label}' - {e}", file=sys.stderr)
             sys.exit(1)
+        n_ev, n_fr = len(events), len(frames)
+        events, frames = trim_run(events, frames, args.skip_s)
+        print(f"{label}: {n_ev} events / {n_fr} frames -> "
+              f"{len(events)} / {len(frames)} after skipping first {args.skip_s:g} s")
+        if len(events) == 0 or len(frames) == 0:
+            print(f"error: '{label}' has no data after skipping {args.skip_s:g} s "
+                  f"(run shorter than the skip?)", file=sys.stderr)
+            sys.exit(1)
+        runs[label] = (events, frames)
 
-    for label_a, label_b in combinations(args.labels, 2):
-        events_a, frames_a = runs[label_a]
-        events_b, frames_b = runs[label_b]
-        compare_pair(
-            label_a, events_a, frames_a,
-            label_b, events_b, frames_b,
-            args.bin_ms,
-            make_plots=not args.no_plots,
-            tau_max_ms=args.tau_max_ms,
-            tau_cutoff_ms=args.tau_cutoff_ms,
-            tau_bins=args.tau_bins,
-            skip_s=args.skip_s,
-        )
+    print(f"\n{'='*70}\ncomparing {len(labels)} runs: {', '.join(labels)}\n{'='*70}")
+
+    # ---- 1. Events per time bin ----
+    counts = [bin_counts(runs[l][1], args.bin_ms) for l in labels]
+    print(f"\n[events per {args.bin_ms:.0f} ms bin]")
+    for label, c in zip(labels, counts):
+        std = c.std(ddof=1) if len(c) > 1 else float("nan")
+        print(f"  {label}: {len(c)} bins  mean={c.mean():.2f}  std={std:.2f}")
+
+    # ---- 1b. Average / peak event rate in Mev/s ----
+    print(f"\n[event rate, Mev/s  (peak uses {args.bin_ms:.0f} ms bins)]")
+    print(f"  {'run':<24}{'events':>14}{'duration s':>12}{'avg Mev/s':>12}{'max Mev/s':>12}")
+    for label, c in zip(labels, counts):
+        total, span, avg, peak = rate_stats(runs[label][1], c, args.bin_ms)
+        print(f"  {label:<24}{total:>14.0f}{span:>12.2f}{avg:>12.4f}{peak:>12.4f}")
+
+    # ---- 2. Per-pixel inter-event interval (tau) ----
+    taus = [compute_tau(runs[l][0]) for l in labels]
+    print(f"\n[per-pixel inter-event interval (tau), all revisits]")
+    for label, tau in zip(labels, taus):
+        if len(tau):
+            print(f"  {label}: n={len(tau)} pixel-revisits  "
+                  f"median={np.median(tau)*1e6:.1f} us  mean={tau.mean()*1e6:.1f} us")
+        else:
+            print(f"  {label}: no repeat events at any pixel")
+
+    if not args.no_plots:
+        plot_rate(labels, args.bin_ms, counts, f"{args.out_prefix}_rate.png")
+        plot_tau(labels, taus, f"{args.out_prefix}_tau.png",
+                 tau_max_ms=args.tau_max_ms, tau_cutoff_ms=args.tau_cutoff_ms,
+                 n_bins=args.tau_bins)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+#Test 1 plot cmd
+python3 compare_events_plot_multi_ev_rate.py clahe_raw_custom_sensor clahe_rgba_custom_sensor default_raw_custom_sensor default_rgba_custom_sensor --tau-cutoff-ms 40
+
+#Test 2 plot cmd
+python3 compare_events_plot_multi_ev_rate.py clahe_raw_custom_sensor clahe_rgba_custom_sensor clahe_raw_custom_sensor_deterministic clahe_rgba_custom_sensor_deterministic --tau-cutoff-ms 40
+
+#Test 3 plot cmd
+python3 compare_events_plot_multi_ev_rate.py default_raw_custom_sensor default_rgba_custom_sensor default_raw_custom_sensor_deterministic default_rgba_custom_sensor_deterministic --tau-cutoff-ms 40
+
+
+
