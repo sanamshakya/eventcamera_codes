@@ -1,12 +1,15 @@
 ## File Desscriptions
-`main.cpp` - Main application based on sample camera application from DriveWorks SDK
-`EventGeneratorCuda.cu, EventGeneratorCuda.cuh` - Cuda kernel for event gneration
-`ClaheCuda.cu, ClaheCuda.cuh` - Cuda kernel for CLAHE processing
-`ResizeRaw.cu, ResizeRaw.cuh` - Cuda kernel for RAW resizing
-`dvs_types.h` - Sensor K parameters
-`EventLogger.cpp, Eventloger.h` - Events data logging helper files
-`GenProfiler.h` - Helper file for profiling CUDA kernels
-`Event.h, EventPacket.h, IEventGenerator.h` - Data structures used for Event Generation
+`main.cpp` - Main application based on sample camera application from DriveWorks SDK \
+`EventGeneratorCuda.cu, EventGeneratorCuda.cuh` - Cuda kernel for event gneration \
+`ClaheCuda.cu, ClaheCuda.cuh` - Cuda kernel for CLAHE processing \
+`ResizeRaw.cu, ResizeRaw.cuh` - Cuda kernel for RAW resizing \
+`dvs_types.h` - Sensor K parameters \
+`EventLogger.cpp, Eventloger.h` - Events data logging helper files \
+`GenProfiler.h` - Helper file for profiling CUDA kernels \
+`Event.h, EventPacket.h, IEventGenerator.h` - Data structures used for Event Generation \
+`run_capture_event_stream.sh` - Commands for capturing raw stream for various tests \
+`capture_raw_input_event_stream.sh` - Script for capturing raw input stream and event stream \
+`capture_rgba_input_event_stream.sh` - Script for capturing rgba input stream and event stream
 
 ## CMakeLists.txt updates
 - adding source files for CUDA kernel and event logging *.cpp at SOURCE variable 
