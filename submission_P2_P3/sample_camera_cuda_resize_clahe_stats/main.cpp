@@ -180,6 +180,131 @@ private:
     std::thread m_thread; // declared last: starts after everything above exists
 };
 
+// Writes the NATIVE input frames (before any resize / shift / CLAHE) to plain,
+// headerless binary files for offline analysis, e.g. dynamic-range profiling with
+// dynrange.py:
+//   <prefix>.raw.u16          N x (H x W) uint16, little endian, tightly packed
+//   <prefix>.rgba.u8          N x (H x W x 4) uint8, tightly packed
+//   <prefix>.meta.json        sizes / frame counts
+//   <prefix>.timestamps.csv   index,frame,timestamp_us (DriveWorks camera timestamp)
+// Single-threaded: used from the render thread only. The files are opened on the first
+// frame, when the real image size is known.
+class InputFrameDumper
+{
+public:
+    InputFrameDumper(const std::string &prefix, bool raw, bool rgba, int every, int maxFrames)
+        : m_prefix(prefix), m_wantRaw(raw), m_wantRgba(rgba),
+          m_every(every < 1 ? 1 : every), m_max(maxFrames)
+    {
+        m_ts = std::fopen((prefix + ".timestamps.csv").c_str(), "w");
+        if (m_ts)
+            std::fprintf(m_ts, "index,frame,timestamp_us\n");
+    }
+
+    ~InputFrameDumper()
+    {
+        writeMeta();
+        if (m_fRaw)
+            std::fclose(m_fRaw);
+        if (m_fRgba)
+            std::fclose(m_fRgba);
+        if (m_ts)
+            std::fclose(m_ts);
+    }
+
+    bool wantRaw() const { return m_wantRaw; }
+    bool wantRgba() const { return m_wantRgba; }
+    bool finished() const { return m_max > 0 && m_saved >= m_max; }
+    int saved() const { return m_saved; }
+
+    // Call once per camera frame. True if this frame should be saved.
+    bool due()
+    {
+        m_curFrame = m_seen++;
+        return !finished() && (m_curFrame % m_every) == 0;
+    }
+
+    // base: host pointer to the first row, pitchBytes: row stride in bytes.
+    bool addRaw(const void *base, size_t pitchBytes, uint32_t w, uint32_t h)
+    {
+        return addPlane(m_fRaw, ".raw.u16", m_rawW, m_rawH, base, pitchBytes, w, h, 2);
+    }
+
+    bool addRgba(const void *base, size_t pitchBytes, uint32_t w, uint32_t h)
+    {
+        return addPlane(m_fRgba, ".rgba.u8", m_rgbaW, m_rgbaH, base, pitchBytes, w, h, 4);
+    }
+
+    // After the planes of one frame are written.
+    void commit(int64_t timestampUs)
+    {
+        if (m_ts)
+            std::fprintf(m_ts, "%d,%d,%lld\n", m_saved, m_curFrame, static_cast<long long>(timestampUs));
+        if (m_saved == 0)
+            writeMeta(); // sizes are known now; rewritten with the final counts on destruction
+        ++m_saved;
+        if (finished())
+            std::printf("InputFrameDumper: %d frames saved to %s.*\n", m_saved, m_prefix.c_str());
+    }
+
+private:
+    bool addPlane(FILE *&f, const char *ext, uint32_t &fw, uint32_t &fh, const void *base,
+                  size_t pitchBytes, uint32_t w, uint32_t h, size_t bytesPerPixel)
+    {
+        if (!f)
+        {
+            f = std::fopen((m_prefix + ext).c_str(), "wb");
+            if (!f)
+            {
+                std::fprintf(stderr, "InputFrameDumper: cannot open %s%s\n", m_prefix.c_str(), ext);
+                return false;
+            }
+            fw = w;
+            fh = h;
+        }
+        if (w != fw || h != fh)
+        {
+            std::fprintf(stderr, "InputFrameDumper: %s size changed (%ux%u -> %ux%u), frame skipped\n",
+                         ext, fw, fh, w, h);
+            return false;
+        }
+        const uint8_t *p = static_cast<const uint8_t *>(base);
+        for (uint32_t y = 0; y < h; ++y)
+        {
+            if (std::fwrite(p + static_cast<size_t>(y) * pitchBytes, 1, static_cast<size_t>(w) * bytesPerPixel, f) !=
+                static_cast<size_t>(w) * bytesPerPixel)
+            {
+                std::fprintf(stderr, "InputFrameDumper: write failed (disk full?)\n");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void writeMeta() const
+    {
+        FILE *f = std::fopen((m_prefix + ".meta.json").c_str(), "w");
+        if (!f)
+            return;
+        std::fprintf(f, "{\n  \"frames_saved\": %d,\n  \"every\": %d", m_saved, m_every);
+        if (m_fRaw)
+            std::fprintf(f, ",\n  \"raw\": {\"width\": %u, \"height\": %u, \"dtype\": \"uint16\", \"endian\": \"little\"}",
+                         m_rawW, m_rawH);
+        if (m_fRgba)
+            std::fprintf(f, ",\n  \"rgba\": {\"width\": %u, \"height\": %u, \"dtype\": \"uint8\", \"channels\": 4}",
+                         m_rgbaW, m_rgbaH);
+        std::fprintf(f, "\n}\n");
+        std::fclose(f);
+    }
+
+    std::string m_prefix;
+    bool m_wantRaw, m_wantRgba;
+    int m_every, m_max;
+    int m_seen = 0, m_curFrame = 0, m_saved = 0;
+    FILE *m_fRaw = nullptr, *m_fRgba = nullptr, *m_ts = nullptr;
+    uint32_t m_rawW = 0, m_rawH = 0, m_rgbaW = 0, m_rgbaH = 0;
+};
+
 class CameraCustomSimpleApp : public DriveWorksSample
 {
 private:
@@ -273,6 +398,11 @@ private:
     int m_eventRawShift = 0;
     uint32_t m_eventCamera = 0;
     std::vector<uint16_t> m_lumaBuf;
+    // --dump-input: native raw / RGBA frames for offline dynamic-range profiling.
+    std::unique_ptr<InputFrameDumper> m_dumper;
+    std::vector<uint16_t> m_dumpRawHost; // staging for the raw device -> host copy
+    uint32_t m_dumpCamera = 0;
+
     std::unique_ptr<AsyncEventLogger> m_eventLogger; // --event-csv: <prefix>.events.csv / .frames.csv
     // Event time base. DriveWorks timestamps are int64 microseconds (absolute,
     // ~1.7e15 us). Event/CSV time is seconds RELATIVE to the first event-camera
@@ -384,6 +514,7 @@ public:
             m_rawResized = nullptr;
         }
         m_eventLogger.reset(); // joins the writer thread and flushes both CSVs
+        m_dumper.reset();      // writes the final meta.json
         if (m_streamerEvToGL)
         {
             dwImageStreamerGL_release(m_streamerEvToGL);
@@ -1208,6 +1339,46 @@ public:
         }
 
         //------------------------------------------------------------------------------
+        // input frame dump (dynamic-range profiling). Needs 'raw' in the rig's
+        // output-requested for the raw stream and a processed output for RGBA.
+        // -----------------------------------------
+        {
+            const std::string dumpPrefix = getArgument("dump-input");
+            if (!dumpPrefix.empty())
+            {
+                const std::string streams = getArgument("dump-input-streams");
+                bool wantRaw = (streams == "raw" || streams == "both");
+                bool wantRgba = (streams == "rgba" || streams == "both");
+                m_dumpCamera = static_cast<uint32_t>(std::stoi(getArgument("dump-camera")));
+
+                if (m_dumpCamera >= m_totalCameras)
+                {
+                    logWarn("dump-input: camera %u out of range (%u cameras); dump disabled\n", m_dumpCamera, m_totalCameras);
+                    wantRaw = wantRgba = false;
+                }
+                if (wantRaw && !m_useRaw)
+                {
+                    logWarn("dump-input: 'raw' is not in output-requested; raw dump disabled\n");
+                    wantRaw = false;
+                }
+                if (wantRgba && !m_useProcessed)
+                {
+                    logWarn("dump-input: no processed output; RGBA dump disabled\n");
+                    wantRgba = false;
+                }
+                if (wantRaw || wantRgba)
+                {
+                    m_dumper.reset(new InputFrameDumper(dumpPrefix, wantRaw, wantRgba,
+                                                        std::stoi(getArgument("dump-input-every")),
+                                                        std::stoi(getArgument("dump-input-max"))));
+                    log("onInitialize: dumping camera %u input to %s.* (raw %d, rgba %d, every %s, max %s frames)\n",
+                        m_dumpCamera, dumpPrefix.c_str(), wantRaw, wantRgba,
+                        getArgument("dump-input-every").c_str(), getArgument("dump-input-max").c_str());
+                }
+            }
+        }
+
+        //------------------------------------------------------------------------------
         // initializes recorder serializer
         // -----------------------------------------
         {
@@ -1507,6 +1678,65 @@ public:
     ///     - run EventGeneratorCUDA::generate()
     ///------------------------------------------------------------------------------
 
+    /// Saves the NATIVE frame of --dump-camera (before resize / shift / CLAHE), see
+    /// InputFrameDumper. Debug / profiling only: it synchronises the device and writes
+    /// to disk on the render thread.
+    void dumpInputFrames(dwCameraFrameHandle_t frame, uint32_t cameraIndex)
+    {
+        if (!m_dumper || cameraIndex != m_dumpCamera || !m_dumper->due())
+            return;
+
+        dwTime_t timestampUs = 0;
+
+        if (m_dumper->wantRaw())
+        {
+            dwImageHandle_t raw = DW_NULL_HANDLE;
+            CHECK_DW_ERROR(dwSensorCamera_getImage(&raw, DW_CAMERA_OUTPUT_CUDA_RAW_UINT16, frame));
+            CHECK_DW_ERROR(dwImage_getTimestamp(&timestampUs, raw));
+
+            dwImageCUDA *cu = nullptr;
+            CHECK_DW_ERROR(dwImage_getCUDA(&cu, raw));
+
+            const uint32_t w = cu->prop.width;
+            const uint32_t h = cu->prop.height;
+            const size_t rowBytes = static_cast<size_t>(w) * sizeof(uint16_t);
+            m_dumpRawHost.resize(static_cast<size_t>(w) * h);
+
+            // The producer may still be writing on another stream: wait for it.
+            if (cudaDeviceSynchronize() != cudaSuccess ||
+                cudaMemcpy2D(m_dumpRawHost.data(), rowBytes, cu->dptr[0], static_cast<size_t>(cu->pitch[0]),
+                             rowBytes, h, cudaMemcpyDeviceToHost) != cudaSuccess)
+            {
+                throw std::runtime_error("dumpInputFrames: raw device -> host copy failed");
+            }
+            m_dumper->addRaw(m_dumpRawHost.data(), rowBytes, w, h);
+        }
+
+        if (m_dumper->wantRgba())
+        {
+            dwImageHandle_t rgba = DW_NULL_HANDLE;
+            CHECK_DW_ERROR(dwSensorCamera_getImage(&rgba, DW_CAMERA_OUTPUT_CUDA_RGBA_UINT8, frame));
+            if (!m_dumper->wantRaw())
+            {
+                CHECK_DW_ERROR(dwImage_getTimestamp(&timestampUs, rgba));
+            }
+
+            const dwTime_t timeout = 500000;
+            CHECK_DW_ERROR(dwImageStreamer_producerSend(rgba, m_streamerToCPUGrab[cameraIndex]));
+            dwImageHandle_t frameCPU = DW_NULL_HANDLE;
+            CHECK_DW_ERROR(dwImageStreamer_consumerReceive(&frameCPU, timeout, m_streamerToCPUGrab[cameraIndex]));
+
+            dwImageCPU *cpu = nullptr;
+            CHECK_DW_ERROR(dwImage_getCPU(&cpu, frameCPU));
+            m_dumper->addRgba(cpu->data[0], static_cast<size_t>(cpu->pitch[0]), cpu->prop.width, cpu->prop.height);
+
+            CHECK_DW_ERROR(dwImageStreamer_consumerReturn(&frameCPU, m_streamerToCPUGrab[cameraIndex]));
+            CHECK_DW_ERROR(dwImageStreamer_producerReturn(nullptr, timeout, m_streamerToCPUGrab[cameraIndex]));
+        }
+
+        m_dumper->commit(static_cast<int64_t>(timestampUs));
+    }
+
     void processEvents(dwCameraFrameHandle_t frame, uint32_t cameraIndex)
     {
         if (!m_eventGen || cameraIndex != m_eventCamera)
@@ -1752,7 +1982,8 @@ public:
                 onRenderHelper(frame[i], i);
             }
 
-            // Event generation runs on the same frame, before it is returned.
+            // Input dump and event generation run on the same frame, before it is returned.
+            dumpInputFrames(frame[i], i);
             processEvents(frame[i], i);
 #if (VIBRANTE_PDK_DECIMAL >= 6000200) || defined(LINUX_AND_EMU)
             dwImageHandle_t img = DW_NULL_HANDLE;
@@ -1931,6 +2162,11 @@ int main(int argc, const char **argv)
                               ProgramArguments::Option_t("event-clahe", "0", "If 1, apply CLAHE (GPU) to the event generator input, after the resize. Toggle at runtime with H\n"),
                               ProgramArguments::Option_t("event-clahe-clip", "2.0", "CLAHE clip limit\n"),
                               ProgramArguments::Option_t("event-clahe-bits", "12", "CLAHE histogram depth for the raw input: 8 or 12. Must cover the range AFTER --event-raw-shift (12 for 0..4095, 8 for 0..255); larger values saturate. The RGBA input always uses 8\n"),
+                              ProgramArguments::Option_t("dump-input", "", "If not empty, write the NATIVE input frames of --dump-camera to <prefix>.raw.u16 / .rgba.u8 / .meta.json / .timestamps.csv (for dynrange.py). Needs 'raw' in output-requested for the raw stream\n"),
+                              ProgramArguments::Option_t("dump-input-streams", "both", "Which streams to dump: raw, rgba or both\n"),
+                              ProgramArguments::Option_t("dump-input-every", "1", "Save every Nth camera frame\n"),
+                              ProgramArguments::Option_t("dump-input-max", "100", "Stop after N saved frames (0 = until exit). Native 1920x1080: ~4 MB/frame raw, ~8 MB/frame RGBA\n"),
+                              ProgramArguments::Option_t("dump-camera", "0", "Camera index to dump\n"),
                               ProgramArguments::Option_t("event-label", "driveworks", "Label column written by the event logger (use different labels per app for compare_events.py)\n"),
                               ProgramArguments::Option_t("event-display", "1", "If 1 (and --enable-events=1), show the latest event packet in an extra tile\n"),
                               ProgramArguments::Option_t("event-width", "1280", "Event generator width  (0 = native camera width)\n"),
